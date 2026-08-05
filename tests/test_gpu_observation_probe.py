@@ -52,6 +52,44 @@ class GpuObservationProbeTests(unittest.TestCase):
         right_q = readout_q_from_rgb_frames([right_frame] * 4)
         self.assertLess(left_q[0], right_q[0])
 
+
+    def test_readout_accepts_array_like_video_and_frames(self) -> None:
+        class FakeFrame:
+            def __init__(self, data):
+                self._data = data
+                self.shape = (len(data), len(data[0]), 3)
+
+            def __len__(self):
+                return len(self._data)
+
+            def __getitem__(self, index):
+                return self._data[index]
+
+        class FakeVideo:
+            def __init__(self, frames):
+                self._frames = frames
+                first = frames[0]
+                self.shape = (len(frames), first.shape[0], first.shape[1], 3)
+
+            def __len__(self):
+                return len(self._frames)
+
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    return FakeVideo(self._frames[index])
+                return self._frames[index]
+
+            def __bool__(self):
+                raise ValueError("ambiguous truth value")
+
+        dark = [[(8, 8, 8) for _x in range(32)] for _y in range(24)]
+        bright_right = [[pixel for pixel in row] for row in dark]
+        for y in range(10, 14):
+            for x in range(24, 28):
+                bright_right[y][x] = (240, 240, 240)
+        q = readout_q_from_rgb_frames(FakeVideo([FakeFrame(bright_right) for _ in range(6)]))
+        self.assertGreater(q[0], 0.0)
+
     def test_cli_dry_run_writes_result_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir) / "probe"

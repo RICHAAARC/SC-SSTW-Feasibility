@@ -106,9 +106,10 @@ def _point_prompt(point: Vector2) -> str:
 def readout_q_from_rgb_frames(frames: Sequence[Any]) -> Vector2:
     """Compute a two-dimensional relation observation from RGB frames."""
 
-    if not frames:
+    frame_count = len(frames)
+    if frame_count == 0:
         raise ValueError("frames must not be empty")
-    start = max(0, len(frames) // 2 - 2)
+    start = max(0, frame_count // 2 - 2)
     stop = min(len(frames), start + 4)
     selected = frames[start:stop]
     horizontal_values: list[float] = []
@@ -126,8 +127,12 @@ def readout_q_from_rgb_frames(frames: Sequence[Any]) -> Vector2:
 
 
 def _frame_size(frame: Any) -> tuple[int, int]:
-    if hasattr(frame, "size"):
-        width, height = frame.size
+    shape = getattr(frame, "shape", None)
+    if shape is not None and len(shape) >= 2:
+        return int(shape[1]), int(shape[0])
+    size = getattr(frame, "size", None)
+    if isinstance(size, tuple) and len(size) >= 2:
+        width, height = size[:2]
         return int(width), int(height)
     height = len(frame)
     width = len(frame[0]) if height else 0
