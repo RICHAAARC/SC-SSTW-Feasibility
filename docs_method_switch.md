@@ -1211,3 +1211,42 @@ CPU-only synthetic evidence.
   owner/wrong margin is 0.29703240, while forced single-path exact alignment is
   62/64 due shifted low-residual neighbors. The next boundary is real
   observation/injection transfer, not more CPU synthetic temporal stress.
+
+
+## 2026-08-05 GPU observation probe boundary
+
+After CPU-only threshold-window and temporal-robustness closure, a minimal
+GPU/saved-video observation probe was executed from Colab. It generated 10 short
+Wan videos and packaged result JSON, subprocess log, and MP4 files under:
+
+```text
+G:\我的云端硬盘\SSTW\diagnostic_tests\sc_sstw_gpu_observation_probe\20260805_151517
+```
+
+The run is a diagnostic observation probe only. It does not perform detection,
+observer synchronization, wrong-key testing, fixed-FPR calibration, video attack
+testing, or a paper claim.
+
+The result is negative for the tested observation path:
+
+```text
+probe_decision = no_observable_signal
+repeatability_floor_l2 = 0.651854794829629
+public_aisb_residual = 1.0996303271706644
+public_visibility_snr_over_repeat_floor = 0.04765786877152943
+state_relation_delta_l2 = 0.0006008096833611169
+state_relation_snr_over_repeat_floor = 0.0009216925120849139
+```
+
+Method implication:
+
+- CPU-only AISB acquisition, self-calibration, and state synchronization remain
+  feasible in the synthetic relation-channel construction.
+- The prompt-only saved-video patch-brightness observation path is not usable in
+  its current form. The readout floor dominates the public relation signal, and
+  the state-window direction signal is essentially absent.
+- The next observation hypothesis should move away from static patch brightness
+  and toward motion-subject readout: frame difference, moving-blob centroid,
+  foreground mask, bbox/center tracking, or optical-flow centroid. This should
+  begin as another minimal observation probe, not as a detector, Gate, observer,
+  or fixed-FPR experiment.

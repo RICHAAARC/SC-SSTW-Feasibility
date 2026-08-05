@@ -22,15 +22,19 @@ Current GPU boundary:
 
 - CPU-only synthetic synchronization feasibility is closed for the current
   AISB + self-calibrated state synchronization route.
-- The next step is a minimal GPU/saved-video observation probe that only asks
-  whether a real generated video readout can produce a stable relation
-  observation `q_i`.
-- This probe is not a detector, not fixed-FPR calibration, not an observer, not
-  an attack suite, and not paper evidence.
-- Local validation uses `--dry-run`; the real path must be run by the user in a
-  GPU Colab session.
+- A minimal GPU/saved-video observation probe has run successfully and produced
+  10 videos plus a result package. The probe returned `no_observable_signal`.
+- The failed observation path is specific: text-prompt-only geometric control
+  plus saved-video patch-brightness readout. It does not invalidate the CPU
+  synthetic synchronization mechanism.
+- The next route should inspect or build a motion-subject observation probe:
+  frame difference, moving-blob centroid, foreground mask, or optical-flow
+  centroid.
+- This repository still contains diagnostic feasibility evidence only: no
+  detector, no observer, no fixed-FPR calibration, no attack suite, and no paper
+  claim.
 
-Minimal GPU observation probe entrypoints:
+Minimal GPU observation probe entrypoints remain available for diagnostics:
 
 ```bash
 python3 experiments/run_gpu_observation_probe.py --dry-run

@@ -1,7 +1,93 @@
 # CPU-only Synthetic Feasibility Results
 
-Status: synthetic relation-channel probe only. No video, GPU, Wan runtime, saved
-video observation, or paper claim.
+Status: synthetic relation-channel probe plus one minimal GPU/saved-video
+observation probe. The GPU probe is diagnostic only: no detector, no observer,
+no fixed-FPR calibration, no attack suite, and no paper claim.
+
+## 2026-08-05 result 250: minimal GPU saved-video observation probe has no observable relation signal
+
+Run artifact:
+
+```text
+Drive root: G:\我的云端硬盘\SSTW\diagnostic_tests\sc_sstw_gpu_observation_probe\20260805_151517
+JSON: gpu_observation_probe_result.json
+ZIP: sc_sstw_gpu_observation_probe_20260805_151517.zip
+JSON SHA256: c41ea607676c5251c012192b5e4a155031c9eb27a796bbd4b66cdfd927279b6c
+ZIP SHA256: e66326ce9c095feedd3eb0cffbad34e740666eb49a6342e645e937b61142f5f5
+```
+
+Package contents were checked locally after Drive readback:
+
+```text
+result JSON: present
+subprocess log: present
+videos: 10 mp4 files
+codec: h264
+resolution: 512x320
+fps: 8
+frames per video: 17
+duration: 2.125 s
+```
+
+The probe generated 10 short videos:
+
+```text
+repeat floor: 2
+public AISB-like points: 6
+state windows: 2
+```
+
+Final JSON summary:
+
+```text
+probe_decision = no_observable_signal
+claim_support_status = gpu_observation_probe_only_not_detection_evidence
+record_count = 10
+readout_finite = true
+readout_shape = [2]
+repeatability_floor_l2 = 0.651854794829629
+public_aisb_residual = 1.0996303271706644
+public_relation_energy_mean = 0.0310660102700827
+public_visibility_snr_over_repeat_floor = 0.04765786877152943
+state_relation_delta_l2 = 0.0006008096833611169
+state_relation_snr_over_repeat_floor = 0.0009216925120849139
+```
+
+Interpretation:
+
+- The run completed and produced videos, JSON, and a ZIP package. This is not a
+  runtime failure.
+- The prompt-only saved-video patch-brightness readout has no usable relation
+  signal under this minimal probe.
+- The repeatability floor is large: two repeat prompts differ by L2 0.65185 in
+  the readout.
+- The public AISB-like geometry is not visible in the readout: residual 1.09963
+  and visibility SNR 0.04766.
+- The two state-window prompts produce effectively no directional signal:
+  state delta L2 0.0006008 and state SNR 0.0009217.
+
+Prior wiring failures during the same GPU observation setup were infrastructure
+issues and were fixed before this completed run:
+
+```text
+ftfy dependency missing -> fixed by adding ftfy to Colab install and runtime import check
+num_frames=16 implicit Wan rounding -> fixed by using 17 frames
+imageio ndarray truth-value handling -> fixed by avoiding array boolean checks
+WanPipeline single 4D video batch -> fixed by unwrapping [T,H,W,C] video arrays before export
+notebook failure packaging -> fixed so failure JSON/log/ZIP are saved before raising
+```
+
+Scientific boundary:
+
+- This result does not invalidate the CPU-only AISB + self-calibrated state
+  synchronization mechanism.
+- It does invalidate this specific observation path: text-prompt-only geometric
+  control plus saved-video patch-brightness readout.
+- The next observation direction should not be static patch brightness. It should
+  use a stronger observation/readout route, preferably motion-subject readout
+  such as frame difference, moving-blob centroid, foreground mask, or optical
+  flow centroid, or a more explicitly controllable visual conditioning setup.
+- This remains diagnostic evidence only, not paper evidence.
 
 ## 2026-08-05 pass 245: burst16 noise0.62 threshold0.01251953125 diagnostic-pruned full layer
 
