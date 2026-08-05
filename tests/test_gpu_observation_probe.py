@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from experiments.run_gpu_observation_probe import _extract_frames  # noqa: E402
 from sc_sstw_feasibility.gpu_observation import (  # noqa: E402
     CLAIM_BOUNDARY,
     dry_run_records,
@@ -52,6 +53,29 @@ class GpuObservationProbeTests(unittest.TestCase):
         right_q = readout_q_from_rgb_frames([right_frame] * 4)
         self.assertLess(left_q[0], right_q[0])
 
+
+
+    def test_extract_frames_accepts_array_like_result(self) -> None:
+        class FakeVideo:
+            def __init__(self):
+                self._frames = ["frame0", "frame1"]
+
+            def __len__(self):
+                return len(self._frames)
+
+            def __getitem__(self, index):
+                return self._frames[index]
+
+            def __iter__(self):
+                return iter(self._frames)
+
+            def __bool__(self):
+                raise ValueError("ambiguous truth value")
+
+        class FakeResult:
+            frames = FakeVideo()
+
+        self.assertEqual(_extract_frames(FakeResult()), ["frame0", "frame1"])
 
     def test_readout_accepts_array_like_video_and_frames(self) -> None:
         class FakeFrame:

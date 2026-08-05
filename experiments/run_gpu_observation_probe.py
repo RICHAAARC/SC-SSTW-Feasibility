@@ -142,7 +142,7 @@ def _extract_frames(result: Any) -> list[Any]:
         frames = result.get("frames")
     if frames is None:
         raise RuntimeError("pipeline result did not expose frames")
-    if frames and isinstance(frames[0], list):
+    if len(frames) > 0 and isinstance(frames[0], list):
         return list(frames[0])
     return list(frames)
 
