@@ -107,11 +107,14 @@ def _real_gpu_records(config: ObservationProbeConfig, output_dir: Path) -> list[
             num_inference_steps=8,
             generator=generator,
         )
-        frames = _extract_frames(result)
-        video_path = video_dir / f"{index:02d}_{prompt['probe_id']}.mp4"
-        export_to_video(frames, str(video_path), fps=config.fps)
-        saved_frames = imageio.imread(video_path)
-        q = readout_q_from_rgb_frames(saved_frames)
+        try:
+            frames = _extract_frames(result)
+            video_path = video_dir / f"{index:02d}_{prompt['probe_id']}.mp4"
+            export_to_video(frames, str(video_path), fps=config.fps)
+            saved_frames = imageio.imread(video_path)
+            q = readout_q_from_rgb_frames(saved_frames)
+        except Exception as exc:
+            raise RuntimeError(f"probe {prompt['probe_id']} video export/readout failed: {exc}") from exc
         records.append(
             {
                 "probe_id": prompt["probe_id"],
@@ -142,8 +145,13 @@ def _extract_frames(result: Any) -> list[Any]:
         frames = result.get("frames")
     if frames is None:
         raise RuntimeError("pipeline result did not expose frames")
-    if len(frames) > 0 and isinstance(frames[0], list):
-        return list(frames[0])
+    if len(frames) > 0:
+        first = frames[0]
+        first_shape = getattr(first, "shape", None)
+        if isinstance(first, list):
+            return list(first)
+        if first_shape is not None and len(first_shape) == 4:
+            return list(first)
     return list(frames)
 
 

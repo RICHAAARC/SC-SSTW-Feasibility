@@ -77,6 +77,28 @@ class GpuObservationProbeTests(unittest.TestCase):
 
         self.assertEqual(_extract_frames(FakeResult()), ["frame0", "frame1"])
 
+
+    def test_extract_frames_unwraps_single_array_video_batch(self) -> None:
+        class FakeVideoArray:
+            shape = (2, 24, 32, 3)
+
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                return f"frame{index}"
+
+            def __iter__(self):
+                return iter(["frame0", "frame1"])
+
+            def __bool__(self):
+                raise ValueError("ambiguous truth value")
+
+        class FakeBatch:
+            frames = [FakeVideoArray()]
+
+        self.assertEqual(_extract_frames(FakeBatch()), ["frame0", "frame1"])
+
     def test_readout_accepts_array_like_video_and_frames(self) -> None:
         class FakeFrame:
             def __init__(self, data):
