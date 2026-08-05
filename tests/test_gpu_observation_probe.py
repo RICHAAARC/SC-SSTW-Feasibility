@@ -82,6 +82,8 @@ class GpuObservationProbeTests(unittest.TestCase):
         self.assertIn("run_gpu_observation_probe.py", joined)
         self.assertIn("Popen", joined)
         self.assertIn("notebook_subprocess_output.log", joined)
+        self.assertIn("ftfy", joined)
+        self.assertIn("'17'", joined)
         self.assertIn("make_archive", joined)
         self.assertIn("GPU observation probe failed after packaging", joined)
         self.assertIn("/content/drive/MyDrive/SSTW/diagnostic_tests/sc_sstw_gpu_observation_probe", joined)

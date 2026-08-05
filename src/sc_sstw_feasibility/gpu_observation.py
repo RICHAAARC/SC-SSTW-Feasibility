@@ -30,7 +30,7 @@ class ObservationProbeConfig:
     template_id: str = "alpha"
     repeat_count: int = 2
     state_window_count: int = 2
-    frame_count: int = 16
+    frame_count: int = 17
     width: int = 512
     height: int = 320
     fps: int = 8
