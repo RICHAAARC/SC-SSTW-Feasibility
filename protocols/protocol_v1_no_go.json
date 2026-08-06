@@ -1,0 +1,36 @@
+{
+  "protocol_id": "mechanism_feasibility_v1",
+  "protocol_decision": "NO_GO",
+  "gate_decision": "GATE_FAIL",
+  "reason_code": "inadmissible_unconstrained_random_channel",
+  "reason": "unconstrained random channel generator produced an inadmissible case",
+  "failure_case": 3,
+  "observed_condition_number": 19.87784943452387,
+  "maximum_condition_number": 10.0,
+  "resampling_permitted": false,
+  "method_conclusion": "not_determined",
+  "partial_bridge_boundary": "cases 0-2 only; not a complete synthetic Gate and not GPU or saved-video evidence",
+  "reproduction_command": "python3 experiments/run_mechanism_synthetic_gate.py --config configs/mechanism_feasibility_v1.json --output-dir /tmp/sc_sstw_gate1_v1_reproduction",
+  "expected_exit_code": 2,
+  "expected_failure_reason": "case 3 frozen channel condition 19.87784943452387 exceeds 10.0; no resampling allowed",
+  "source_sha256": {
+    "METHOD_CONTRACT.md": "c321baf3effa99d58b915584a7e2ce4060f3a42acfa0fdc3234a18d000add632",
+    "configs/mechanism_feasibility_v1.json": "e59514c0d395083576650055f4aa41e7e1043d50152fed0e42145ef285ce76e4",
+    "src/sc_sstw_feasibility/mechanism_synthetic_gate.py": "4f955c7f84733d1e7c2962e774c6b13c6649b84ba8d36290c5a0cdbad5f101ba",
+    "experiments/run_mechanism_synthetic_gate.py": "7434d37ab15745eafae8fa9ab3e9ead05b3eee83d0233d2f95c6723848d3824d",
+    "tests/test_method_contract.py": "b28c1c33f0f2b2568ad5acae08422210e9fcb58a8e33501ec2d1fe08d9c20f26",
+    "tests/test_mechanism_synthetic_gate.py": "2d8ee0ef6fb57ae63f4a22671ceecdd235ca18c88c1e049b3508140e36de07b6"
+  },
+  "original_evidence": {
+    "implementer_metrics": "/tmp/sc_sstw_gate1_frozen_v1_packaged/metrics.json",
+    "implementer_metrics_sha256": "efe4a54bfad0c3c49963b8ea7e0210f96e21c170b4861437f678fccb4c464ef3",
+    "auditor_replay_metrics": "/tmp/sc_sstw_gate1_auditor_replay/metrics.json",
+    "auditor_replay_metrics_sha256": "efe4a54bfad0c3c49963b8ea7e0210f96e21c170b4861437f678fccb4c464ef3"
+  },
+  "prohibited_reinterpretations": [
+    "do_not_change_seed_or_resample_v1",
+    "do_not_lower_v1_thresholds",
+    "do_not_relabel_v1_as_pass_using_v2",
+    "do_not_claim_method_failure_from_v1_generator_failure"
+  ]
+}

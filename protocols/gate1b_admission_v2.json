@@ -1,0 +1,11 @@
+{
+  "protocol_id": "mechanism_feasibility_v2_gate1b_admission",
+  "gate_0_decision": "GATE_PASS",
+  "gate_1a_decision": "GATE_PASS",
+  "gate_1a_evidence_sha256": "40472cf3722b9f2da9f53633dd014b08cec9da87952c4a4f83de3da42559ae98",
+  "config_sha256": "1b4d60ff1dee238c89c7d801e6ac75b05edf2f54031132894f0924fc6050d57e",
+  "channel_sha256": "e141c86a6ee4ceb867a127099b7820e9699f0a35197d6c5068a26f426fab6e5a",
+  "required_gate_1a_evidence_path_argument": true,
+  "matrix_comparison_absolute_tolerance": 1e-15,
+  "gpu_admitted": false
+}
