@@ -1,0 +1,110 @@
+{
+  "claim_scope": "real_direct_model_output_residual_propagation_diagnostic_only",
+  "forbidden_claims": [
+    "saved_mp4_method_pass",
+    "owner_wrong_key_pass",
+    "temporal_edit_pass",
+    "scheduler_control_pass",
+    "paired_difference_as_blind_observation",
+    "method_pass"
+  ],
+  "generation": {
+    "fps": 8,
+    "frame_count": 49,
+    "guidance_scale": 5.0,
+    "height": 320,
+    "inference_steps": 8,
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple subjects, flicker",
+    "prompt": "locked camera, dark matte background, a single bright white cube moving slowly across the center, simple studio lighting, no text, no cuts",
+    "seed": 1275,
+    "width": 512
+  },
+  "carrier": {
+    "analytic_basis": [
+      "sqrt_2_cos_2pi_x_centered_over_width_all_channels",
+      "sqrt_2_cos_2pi_y_centered_over_height_all_channels"
+    ],
+    "apply_to": "every_transformer_return_both_cfg_branches",
+    "expected_tensor_shape": [1, 16, 13, 40, 64],
+    "in_place_mutation_permitted": false,
+    "injection_location": "Wan_transformer_forward_return_before_pipeline_CFG_and_scheduler_step",
+    "kind": "direct_model_output_residual",
+    "scheduler_mutation_permitted": false,
+    "target_relative_rms": 0.03,
+    "target_relative_rms_absolute_tolerance": 0.00005,
+    "temporal_points": [
+      [0.0, 0.0],
+      [1.0, 0.0],
+      [0.0, 1.0],
+      [0.25, 0.35],
+      [0.75, 0.2],
+      [0.2, 0.8],
+      [-0.9238795325, 0.3826834324],
+      [0.3826834324, 0.9238795325],
+      [-0.3826834324, -0.9238795325],
+      [0.9238795325, -0.3826834324],
+      [-0.7071067812, 0.7071067812],
+      [0.7071067812, 0.7071067812],
+      [0.0, -1.0]
+    ],
+    "temporal_point_roles": [
+      "public_aisb_anchor_0",
+      "public_aisb_anchor_1",
+      "public_aisb_anchor_2",
+      "public_aisb_checksum_3",
+      "public_aisb_checksum_4",
+      "public_aisb_checksum_5",
+      "propagation_probe_6",
+      "propagation_probe_7",
+      "propagation_probe_8",
+      "propagation_probe_9",
+      "propagation_probe_10",
+      "propagation_probe_11",
+      "propagation_probe_12"
+    ]
+  },
+  "diagnostic_readouts": {
+    "clean_watermarked_paired_difference": "diagnostic_only_never_blind_pass",
+    "latent_callback": "read_only_after_each_scheduler_step_diagnostic_only",
+    "saved_mp4_blind_front_end": "single_watermarked_mp4_luma_cosine_projection_key_independent",
+    "temporal_frame_groups": [[0], [1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20], [21, 22, 23, 24], [25, 26, 27, 28], [29, 30, 31, 32], [33, 34, 35, 36], [37, 38, 39, 40], [41, 42, 43, 44], [45, 46, 47, 48]]
+  },
+  "paired_diagnostic_thresholds": {
+    "maximum_public_aisb_residual": 0.25,
+    "maximum_public_condition_number": 10.0
+  },
+  "model": {
+    "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"
+  },
+  "pass_conditions": {
+    "all_injection_records_finite": true,
+    "blind_saved_mp4_observation_finite_13_by_2": true,
+    "clean_and_watermarked_mp4_each_have_49_frames": true,
+    "direct_transformer_return_injection_used": true,
+    "exact_commit_required": true,
+    "injection_call_count_is_16": true,
+    "latent_callback_shape_is_1_16_13_40_64": true,
+    "model_revision_exact": true,
+    "original_output_tensor_version_unchanged": true,
+    "paired_difference_observation_finite_13_by_2_diagnostic_only": true,
+    "paired_difference_public_aisb_residual_at_most_0_25_diagnostic_only": true,
+    "paired_difference_public_condition_number_at_most_10_diagnostic_only": true,
+    "residual_q_reconstruction_mse_at_most_0_0001": true,
+    "repository_clean": true,
+    "rgb_pre_mp4_observation_finite_13_by_2": true,
+    "scheduler_mutation_absent": true,
+    "target_relative_rms_within_tolerance": true
+  },
+  "protocol_id": "sc_sstw_gpu_carrier_propagation_v1",
+  "python_version_policy": "record_only_not_locked_by_repository",
+  "software": {
+    "accelerate": "1.4.0",
+    "diffusers": "0.35.2",
+    "ftfy": "6.3.1",
+    "imageio": "2.37.0",
+    "imageio_ffmpeg": "0.6.0",
+    "safetensors": "0.5.3",
+    "transformers": "4.49.0"
+  }
+}
