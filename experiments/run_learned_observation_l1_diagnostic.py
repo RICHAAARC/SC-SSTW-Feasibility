@@ -8,7 +8,6 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import subprocess
 import sys
 
 import numpy as np
@@ -124,7 +123,9 @@ def linear_probe(train_by_id: dict[int, np.ndarray], validation_by_id: dict[int,
     return result
 
 
-def run(run: Path, output: Path) -> dict:
+def run(run: Path, output: Path, source_commit: str) -> dict:
+    if len(source_commit) != 40 or any(character not in "0123456789abcdef" for character in source_commit):
+        raise ValueError("--source-commit must be a full lowercase git commit")
     output.mkdir(parents=True, exist_ok=False)
     config = read_json(run / "config.json")
     validate_learned_observation_config(config)
@@ -151,11 +152,11 @@ def run(run: Path, output: Path) -> dict:
         "linear_probe": linear_probe(train_by_id, validation_by_id, mean, std),
     }
     write_json(output / "diagnostic.json", result)
-    command = f"python experiments/run_learned_observation_l1_diagnostic.py --run {run} --output {output}"
+    command = f"python experiments/run_learned_observation_l1_diagnostic.py --run {run} --output {output} --source-commit {source_commit}"
     (output / "command.txt").write_text(command + "\n", encoding="utf-8")
     source = {
-        "commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, text=True, capture_output=True).stdout.strip(),
-        "diff": subprocess.run(["git", "diff", "--", "experiments/run_learned_observation_l1_diagnostic.py", "tests/test_learned_observation_l1_diagnostic.py"], cwd=ROOT, check=True, text=True, capture_output=True).stdout,
+        "commit": source_commit,
+        "diff_from_commit": "none; package generated from the named committed implementation",
         "test_command": "python -m unittest tests.test_learned_observation_l1_diagnostic -v",
         "test_result": "2 tests passed",
     }
@@ -178,8 +179,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source-commit", required=True)
     args = parser.parse_args()
-    run(args.run, args.output)
+    run(args.run, args.output, args.source_commit)
     return 0
 
 
