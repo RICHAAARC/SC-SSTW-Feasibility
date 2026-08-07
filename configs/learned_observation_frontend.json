@@ -1,0 +1,308 @@
+{
+  "protocol_id": "sc_sstw_learned_observation_frontend",
+  "claim_scope": "low_capacity_public_relation_observation_frontend_only",
+  "history_lock": {
+    "direct_model_output_structured_readout_conclusion": "NO_GO",
+    "internal_attention_output_structured_readout_conclusion": "NO_GO",
+    "overall_method_conclusion": "NOT_DETERMINED",
+    "internal_challenger_commit": "cfff68931e30c6c3a070ffa2dc5a548c60d1376a",
+    "internal_challenger_drive_run": "gpu_internal_output_challenger_v1/20260807T022258Z_cfff6893",
+    "internal_challenger_archive_sha256": "40db932af2716ec81f2b3b4553981d402cfbdff8334f4f0c0c5c333cb67a7eab",
+    "internal_challenger_config_sha256": "63c3d31614ebfca096cdeb6196881836b1f919f1bf86c1fabd21cda138254c51"
+  },
+  "forbidden_claims": [
+    "fixed_fpr",
+    "cross_distribution_generalization",
+    "gpu_learned_frontend_pass_before_audited_gpu_evidence",
+    "method_pass_before_owner_wrong_key_and_temporal_edit",
+    "paired_or_internal_diagnostic_as_blind_observation"
+  ],
+  "model": {
+    "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"
+  },
+  "carrier": {
+    "kind": "dit_internal_self_attention_output_residual",
+    "module_path": "transformer.blocks[29].attn1",
+    "block_index": 29,
+    "target_relative_rms": 0.03,
+    "target_relative_rms_absolute_tolerance": 0.00005,
+    "basis_formula_x": "sqrt(2)*cos(2*pi*(w+0.5)/32)_all_t_h_d",
+    "basis_formula_y": "sqrt(2)*cos(2*pi*(h+0.5)/20)_all_t_w_d",
+    "apply_to": "8_steps_each_cond_then_uncond_16_calls",
+    "temporal_points": [
+      [0.0, 0.0],
+      [1.0, 0.0],
+      [0.0, 1.0],
+      [0.25, 0.35],
+      [0.75, 0.2],
+      [0.2, 0.8],
+      [-0.9238795325, 0.3826834324],
+      [0.3826834324, 0.9238795325],
+      [-0.3826834324, -0.9238795325],
+      [0.9238795325, -0.3826834324],
+      [-0.7071067812, 0.7071067812],
+      [0.7071067812, 0.7071067812],
+      [0.0, -1.0]
+    ],
+    "temporal_point_roles": [
+      "public_aisb_anchor_0",
+      "public_aisb_anchor_1",
+      "public_aisb_anchor_2",
+      "public_aisb_checksum_3",
+      "public_aisb_checksum_4",
+      "public_aisb_checksum_5",
+      "propagation_probe_6",
+      "propagation_probe_7",
+      "propagation_probe_8",
+      "propagation_probe_9",
+      "propagation_probe_10",
+      "propagation_probe_11",
+      "propagation_probe_12"
+    ],
+    "public_calibration_indices": [0, 1, 2, 3],
+    "per_video_calibration_held_out_indices": [4, 5]
+  },
+  "generation": {
+    "fps": 8,
+    "frame_count": 49,
+    "height": 320,
+    "width": 512,
+    "inference_steps": 8,
+    "guidance_scale": 5.0,
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple subjects, flicker",
+    "temporal_frame_groups": [
+      [0],
+      [1, 2, 3, 4],
+      [5, 6, 7, 8],
+      [9, 10, 11, 12],
+      [13, 14, 15, 16],
+      [17, 18, 19, 20],
+      [21, 22, 23, 24],
+      [25, 26, 27, 28],
+      [29, 30, 31, 32],
+      [33, 34, 35, 36],
+      [37, 38, 39, 40],
+      [41, 42, 43, 44],
+      [45, 46, 47, 48]
+    ]
+  },
+  "video_io": {
+    "encoder": {
+      "call": "diffusers.utils.export_to_video",
+      "fps": 8,
+      "quality": 5.0,
+      "bitrate": null,
+      "macro_block_size": 16,
+      "opencv_fallback_permitted": false,
+      "required_codec_name": "h264",
+      "required_pixel_format": "yuv420p"
+    },
+    "decoder": {
+      "call": "imageio.v3.imiter",
+      "plugin": "FFMPEG",
+      "fallback_permitted": false,
+      "required_dtype": "uint8",
+      "required_shape": [49, 320, 512, 3]
+    }
+  },
+  "features": {
+    "input": "single_saved_mp4_only",
+    "rgb_scale_divisor": 255.0,
+    "color_transform": {
+      "Y": [0.299, 0.587, 0.114],
+      "Cb": [-0.168736, -0.331264, 0.5],
+      "Cr": [0.5, -0.418688, -0.081312]
+    },
+    "dct_formula": "phi_uv(y,x)=c_u(H)*c_v(W)*cos(pi*(2*y+1)*u/(2*H))*cos(pi*(2*x+1)*v/(2*W));c_0(N)=1/sqrt(N);c_k(N)=sqrt(2/N)",
+    "dct_basis_order": [[1, 0], [0, 1], [2, 0], [0, 2], [1, 1]],
+    "channel_order": ["Y", "Cb", "Cr"],
+    "statistic_order": ["mean", "linear_slope"],
+    "linear_slope_formula": "sum_i((i-mean_i)*(z_i-mean_z))/sum_i((i-mean_i)^2);single_frame_group_is_zero",
+    "feature_dimension": 30,
+    "standardization": {
+      "fit_split": "train",
+      "fit_sample_count": 52,
+      "ddof": 0,
+      "minimum_standard_deviation": 0.000001
+    }
+  },
+  "extractor": {
+    "architecture": ["linear_30_to_16_with_bias", "tanh", "linear_16_to_2_with_bias"],
+    "shared_across_windows": true,
+    "cross_window_connections": false,
+    "position_encoding": false,
+    "forward_input": "standardized_feature_matrix_13_by_30_only",
+    "forward_output": "continuous_finite_matrix_13_by_2_only",
+    "forbidden_forward_inputs": [
+      "dataset_id",
+      "q",
+      "key",
+      "message",
+      "owner",
+      "alignment",
+      "prompt",
+      "seed",
+      "truth",
+      "source_index",
+      "clean_video",
+      "paired_difference",
+      "internal_state",
+      "injection_record"
+    ],
+    "parameter_count": 530
+  },
+  "training": {
+    "runtime": "torch_cpu_float64_deterministic",
+    "initialization_seed": 20260807,
+    "weight_initialization": "xavier_uniform_gain_1",
+    "bias_initialization": "zeros",
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "betas": [0.9, 0.999],
+    "epsilon": 1e-08,
+    "weight_decay": 0.0001,
+    "gradient_norm_clip": 1.0,
+    "full_batch_video_order": [41001, 41002, 41003, 41004],
+    "window_order_per_video": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "optimizer_step_count": 2000,
+    "epoch_definition": "one_full_batch_optimizer_step_over_4_videos_times_13_windows",
+    "scheduler": null,
+    "early_stopping": false,
+    "checkpoint_selection": "step_2000_only",
+    "inner_affine_fit": {
+      "fit_indices": [0, 1, 2, 3],
+      "ridge_diagonal": [1e-08, 1e-08, 0.0],
+      "formula": "B=(Z_C^T*Z_C+diag(ridge_diagonal))^-1*Z_C^T*Y_C",
+      "saved_or_used_at_inference": false
+    },
+    "outer_relation_loss": {
+      "indices": [4, 5],
+      "formula": "frobenius_squared(Y_H-Z_H*B)/(frobenius_squared(Y_H-mean_window(Y_H))+1e-6)"
+    },
+    "rank_loss": {
+      "centering_axis": "13_windows",
+      "formula": "max(0,0.10-s2(centered(Y_all)/sqrt(13)))^2",
+      "weight": 10.0
+    },
+    "affine_scale_loss": {
+      "formula": "max(0,0.05-a2(A))^2",
+      "weight": 10.0
+    },
+    "affine_condition_loss": {
+      "formula": "max(0,a1(A)/max(a2(A),1e-8)-10)^2",
+      "weight": 0.1
+    },
+    "total_loss": "mean_video(outer_relation_loss+10*rank_loss_unweighted+10*affine_scale_loss_unweighted+0.1*affine_condition_loss_unweighted)",
+    "indices_6_through_12_use": "unlabeled_rank_loss_only"
+  },
+  "dataset": {
+    "generation_order": [41001, 41002, 41003, 41004, 41005, 41006, 41007, 41008, 41009, 41010, 41011, 41012, 41013, 41014, 41015, 41016],
+    "l1_permitted_ids": [41001, 41002, 41003, 41004, 41005, 41006],
+    "l2_permitted_only_after_l1_pass_ids": [41007, 41008, 41009, 41010, 41011, 41012, 41013, 41014, 41015, 41016],
+    "items": [
+      {"dataset_id": 41001, "split": "train", "carrier": "watermarked", "seed": 41001, "prompt": "locked camera, dark matte background, a single red sphere moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41002, "split": "train", "carrier": "watermarked", "seed": 41002, "prompt": "locked camera, dark matte background, a single blue cube moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41003, "split": "train", "carrier": "watermarked", "seed": 41003, "prompt": "locked camera, dark matte background, a single brass pendulum moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41004, "split": "train", "carrier": "watermarked", "seed": 41004, "prompt": "locked camera, dark matte background, a single green toy car moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41005, "split": "validation", "carrier": "watermarked", "seed": 41005, "prompt": "locked camera, dark matte background, a single orange cone moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41006, "split": "validation", "carrier": "watermarked", "seed": 41006, "prompt": "locked camera, dark matte background, a single silver disk moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41007, "split": "held_out", "carrier": "watermarked", "seed": 41007, "prompt": "locked camera, dark matte background, a single purple cylinder moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41008, "split": "held_out", "carrier": "watermarked", "seed": 41008, "prompt": "locked camera, dark matte background, a single white paper boat moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41009, "split": "null", "carrier": "clean", "seed": 41009, "prompt": "locked camera, dark matte background, a single amber glass bottle moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41010, "split": "null", "carrier": "clean", "seed": 41010, "prompt": "locked camera, dark matte background, a single wooden hourglass moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41011, "split": "null", "carrier": "clean", "seed": 41011, "prompt": "locked camera, dark matte background, a single ceramic vase moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41012, "split": "null", "carrier": "clean", "seed": 41012, "prompt": "locked camera, dark matte background, a single yellow tennis ball moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41013, "split": "null", "carrier": "clean", "seed": 41013, "prompt": "locked camera, dark matte background, a single copper gear moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41014, "split": "null", "carrier": "clean", "seed": 41014, "prompt": "locked camera, dark matte background, a single teal mug moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41015, "split": "null", "carrier": "clean", "seed": 41015, "prompt": "locked camera, dark matte background, a single gray stone moving slowly across the center, simple studio lighting, no text, no cuts"},
+      {"dataset_id": 41016, "split": "null", "carrier": "clean", "seed": 41016, "prompt": "locked camera, dark matte background, a single pink origami crane moving slowly across the center, simple studio lighting, no text, no cuts"}
+    ]
+  },
+  "acquisition": {
+    "protocol_sha256": "d71fb9e125363b1834ec1da34280b73e49be2678f4a149ae68f9ca9f3f7f7369",
+    "protocol": {
+      "algorithm": "affine_burst_residual_v1_then_single_overlap_cluster_v1",
+      "ambiguity_artifact": {
+        "candidate_fields": ["start_index", "template_id", "residual", "observed_length", "missing_template_index"],
+        "candidate_serialization_order": ["start_index", "observed_length", "template_id", "missing_indices_lexicographic", "residual"],
+        "canonical_json": "utf8_json_sort_keys_compact_separators_allow_nan_false",
+        "digest": "sha256_of_canonical_json_bytes",
+        "freeze_before": ["public_calibration", "held_out_evaluation", "private_scoring"],
+        "membership": "deterministic_accepted_sequence_after_threshold_and_overlap_cluster_selection"
+      },
+      "candidate_key_access": "forbidden",
+      "observation_dimension": 2,
+      "observation_length": 13,
+      "search": {
+        "allow_double_deletion": false,
+        "allow_single_deletion": false,
+        "candidate_enumeration_order": ["observed_length_6", "start_index_ascending_0_through_7", "template_burst_alpha_only"],
+        "cluster_choice_sort": ["start_index", "missing_is_none", "missing_indices_lexicographic", "residual", "template_id"],
+        "cluster_overlap_rule": "candidate_start_strictly_less_than_current_cluster_end",
+        "comparison": "less_than_or_equal",
+        "direction": "forward_only",
+        "near_tie_limit_formula": "minimum_residual_times_1.25_plus_1e-12",
+        "observed_lengths": [6],
+        "residual_formula": "sum_checksum_squared_error_indices_3_4_5_over_total_six_point_scatter_plus_1e-9_using_barycentric_weights_from_template_anchors_0_1_2",
+        "residual_threshold": 0.25,
+        "start_indices": [0, 1, 2, 3, 4, 5, 6, 7],
+        "top_k_per_start": 1
+      },
+      "template": {
+        "points": [[0, 0], [1, 0], [0, 1], [0.25, 0.35], [0.75, 0.2], [0.2, 0.8]],
+        "template_id": "burst_alpha"
+      },
+      "truth_success": {
+        "accepted_candidate_count": 1,
+        "definition": "frozen_accepted_ambiguity_artifact_contains_exactly_the_single_declared_truth_candidate",
+        "exact_candidate": {"missing_template_index": null, "observed_length": 6, "start_index": 0, "template_id": "burst_alpha"}
+      }
+    },
+    "artifact_order": ["acquire", "canonical_serialize", "write", "close", "readback", "verify_sha256", "calibrate_from_readback_only"]
+  },
+  "gate_thresholds": {
+    "validation_required_pass_count": 2,
+    "validation_case_count": 2,
+    "held_out_required_pass_count": 2,
+    "held_out_case_count": 2,
+    "null_required_false_acquisition_count": 0,
+    "null_case_count": 8,
+    "maximum_aisb_residual": 0.25,
+    "minimum_global_centered_output_second_singular_value": 0.1,
+    "minimum_fitted_affine_second_singular_value": 0.05,
+    "maximum_fitted_affine_condition_number": 10.0,
+    "maximum_public_calibration_held_out_mse": 0.02
+  },
+  "static_controls": {
+    "identical_window_features_produce_bitwise_identical_outputs": true,
+    "window_permutation_equivariance": true,
+    "null_control_interpretation": "minimal_empirical_protocol_control_only_not_statistical_fpr"
+  },
+  "quarantine": {
+    "forbidden_local_roots": [
+      "/tmp/sc_sstw_audit_20260807T022258Z/20260807T022258Z_cfff6893",
+      "/tmp/sc_sstw_internal_challenger_20260807T022258Z.tar.gz"
+    ],
+    "forbidden_drive_run": "gpu_internal_output_challenger_v1/20260807T022258Z_cfff6893",
+    "forbidden_mp4_sha256": [
+      "98c9d096b24c22caac2ecaa9f25443cee2a5608dc4ce076439d3b6e8517a53d7",
+      "cb118963716cb5c47078d498aed7dde8fee0d266d7b304727f7abb561478bef8"
+    ],
+    "forbidden_derivatives": ["transcode", "crop", "feature", "observation", "paired_difference", "internal_activation", "injection_record"],
+    "allowed_dataset_provenance": "only_new_formal_cli_artifacts_with_exact_configured_dataset_id_prompt_seed_and_digest"
+  },
+  "gate_order": [
+    "design_contract",
+    "cpu_static_implementation",
+    "gpu_train_validation",
+    "gpu_public_held_out_and_null",
+    "gpu_owner_wrong_key",
+    "gpu_minimal_temporal_edit"
+  ],
+  "software": {
+    "diffusers": "0.35.2",
+    "imageio": "2.37.0",
+    "imageio_ffmpeg": "0.6.0"
+  }
+}
