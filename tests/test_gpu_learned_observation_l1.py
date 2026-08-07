@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import subprocess
@@ -14,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 from src.sc_sstw_feasibility.gpu_internal_challenger import EXPECTED_BRANCHES, EXPECTED_INTERNAL_SHAPE, EXPECTED_TIMESTEPS
 from src.sc_sstw_feasibility.gpu_learned_observation_l1 import (
     EXPECTED_STRUCTURE,
+    GPU_SOFTWARE,
     finalize_l1_success_package,
     inspect_saved_mp4_codec,
     validate_injection_records,
@@ -166,6 +168,105 @@ with mock.patch.object(cli, "run_gpu_learned_observation_l1", side_effect=forced
         for forbidden in ("register_forward_hook", "train_public_relation_frontend", "acquire_and_freeze_ambiguity", "calibrate_from_frozen_ambiguity", "TEMPORAL_POINTS"):
             self.assertNotIn(forbidden, joined)
         self.assertTrue(all(cell["execution_count"] is None and not cell["outputs"] for cell in code_cells))
+        runtime_cell = "".join(notebook["cells"][3]["source"])
+        tree = ast.parse(runtime_cell)
+        direct_imports = {
+            alias.name.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        self.assertTrue({"torch", "numpy", "diffusers", "transformers", "accelerate"}.isdisjoint(direct_imports))
+        self.assertIn("subprocess.run([sys.executable, '-c', probe_code]", runtime_cell)
+        self.assertIn("fresh interpreter", runtime_cell)
+        self.assertIn("_runtime_imports", runtime_cell)
+        self.assertIn("cwd=REPO", runtime_cell)
+        self.assertIn("probe_env['PYTHONPATH'] = str(REPO / 'src')", runtime_cell)
+
+    def _execute_notebook_runtime_cell(self, probe_result=None, probe_exception=None, pip_exception=None, execute_cli_cell=False):
+        notebook = json.loads((ROOT / "notebooks" / "sc_sstw_gpu_learned_observation_l1.ipynb").read_text(encoding="utf-8"))
+        runtime_cell = "".join(notebook["cells"][3]["source"])
+        cli_cell = "".join(notebook["cells"][4]["source"])
+        calls = []
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if "-m" in args and "pip" in args:
+                if pip_exception is not None:
+                    raise pip_exception
+                return mock.Mock(stdout="", stderr="", returncode=0)
+            if "run_gpu_learned_observation_l1.py" in " ".join(map(str, args)):
+                return mock.Mock(stdout="formal-cli", stderr="", returncode=0)
+            if probe_exception is not None:
+                raise probe_exception
+            return mock.Mock(stdout=probe_result or "", stderr="", returncode=0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            namespace = {
+                "BOOTSTRAP_ERROR": None, "REPO": ROOT, "subprocess": mock.Mock(run=fake_run),
+                "LOCAL_RUN": Path(tmpdir) / "run", "EXPECTED_COMMIT": "a" * 40,
+            }
+            exec(compile(runtime_cell, "notebook-runtime-cell", "exec"), namespace)
+            if execute_cli_cell:
+                exec(compile(cli_cell, "notebook-cli-cell", "exec"), namespace)
+            return namespace, calls
+
+    def test_runtime_probe_failures_execute_cell4_and_block_formal_cli(self) -> None:
+        valid = {
+            "versions": GPU_SOFTWARE, "torch": "2.6.0+cu124", "torch_major_2": True,
+            "cuda_available": True, "bf16_supported": True, "gpu": "NVIDIA A100-SXM4-40GB",
+            "ffprobe_path": "/usr/bin/ffprobe", "ffprobe_version": "ffprobe version 6.1",
+        }
+        marker = lambda payload: "SC_SSTW_RUNTIME_PROBE=" + json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        failures = [
+            {"probe_exception": subprocess.CalledProcessError(1, [sys.executable, "-c"])},
+            {"probe_exception": subprocess.TimeoutExpired([sys.executable, "-c"], 300)},
+            {"pip_exception": subprocess.TimeoutExpired([sys.executable, "-m", "pip"], 600)},
+            {"probe_result": "malformed output"},
+            {"probe_result": "SC_SSTW_RUNTIME_PROBE={not-json"},
+            {"probe_result": marker(valid) + "\n" + marker(valid)},
+        ]
+        missing = copy.deepcopy(valid)
+        missing.pop("gpu")
+        extra = {**valid, "unexpected": True}
+        failures.extend(({"probe_result": marker(missing)}, {"probe_result": marker(extra)}))
+        for key, value in (
+            ("versions", {**GPU_SOFTWARE, "numpy": "2.0.0"}),
+            ("torch", ""), ("torch", 2.6), ("torch", "3.0.0"), ("torch", "1.13.1"),
+            ("torch_major_2", False), ("cuda_available", False),
+            ("bf16_supported", False), ("gpu", ""), ("ffprobe_path", None),
+            ("ffprobe_version", ""),
+        ):
+            changed = copy.deepcopy(valid)
+            changed[key] = value
+            failures.append({"probe_result": marker(changed)})
+        for kwargs in failures:
+            namespace, calls = self._execute_notebook_runtime_cell(execute_cli_cell=True, **kwargs)
+            self.assertIsNotNone(namespace["BOOTSTRAP_ERROR"])
+            self.assertIsNone(namespace["RUNTIME_PROBE"])
+            self.assertEqual(namespace["RETURN_CODE"], 2)
+            formal_calls = [args for args, _call_kwargs in calls if "run_gpu_learned_observation_l1.py" in " ".join(map(str, args))]
+            self.assertEqual(formal_calls, [])
+
+    def test_runtime_probe_success_uses_exact_checkout_and_all_formal_imports(self) -> None:
+        valid = {
+            "versions": GPU_SOFTWARE, "torch": "2.6.0+cu124", "torch_major_2": True,
+            "cuda_available": True, "bf16_supported": True, "gpu": "NVIDIA A100-SXM4-40GB",
+            "ffprobe_path": "/usr/bin/ffprobe", "ffprobe_version": "ffprobe version 6.1",
+        }
+        marker = "SC_SSTW_RUNTIME_PROBE=" + json.dumps(valid, sort_keys=True, separators=(",", ":"))
+        namespace, calls = self._execute_notebook_runtime_cell(marker)
+        self.assertIsNone(namespace["BOOTSTRAP_ERROR"])
+        self.assertEqual(namespace["RUNTIME_PROBE"], valid)
+        checker_args, checker_kwargs = calls[1]
+        self.assertEqual(checker_args[:2], [sys.executable, "-c"])
+        self.assertEqual(checker_kwargs["cwd"], ROOT)
+        self.assertEqual(checker_kwargs["env"]["PYTHONPATH"], str(ROOT / "src"))
+        self.assertEqual(checker_kwargs["timeout"], 300)
+        source = (ROOT / "src" / "sc_sstw_feasibility" / "gpu_learned_observation_l1.py").read_text(encoding="utf-8")
+        runtime_imports = source[source.index("def _runtime_imports"):source.index("def run_gpu_learned_observation_l1")]
+        self.assertIn("WanPipeline", runtime_imports)
+        self.assertIn("model_info", runtime_imports)
+        for dependency in GPU_SOFTWARE:
+            self.assertIn(dependency, runtime_imports)
 
 
 if __name__ == "__main__":
