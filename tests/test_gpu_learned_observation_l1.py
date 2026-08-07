@@ -16,12 +16,16 @@ from src.sc_sstw_feasibility.gpu_internal_challenger import EXPECTED_BRANCHES, E
 from src.sc_sstw_feasibility.gpu_learned_observation_l1 import (
     EXPECTED_STRUCTURE,
     GPU_SOFTWARE,
+    LearnedObservationL1Error,
+    _build_internal_preflight_config,
+    _run_internal_preflight_adapter,
     finalize_l1_success_package,
+    run_gpu_learned_observation_l1,
     inspect_saved_mp4_codec,
     validate_injection_records,
     write_l1_failure_package,
 )
-from src.sc_sstw_feasibility.learned_observation import L1_IDS, TRAIN_IDS, VALIDATION_IDS, validate_learned_observation_config
+from src.sc_sstw_feasibility.learned_observation import CONFIG_CANONICAL_SHA256, L1_IDS, TRAIN_IDS, VALIDATION_IDS, canonical_json_bytes, sha256_bytes, validate_learned_observation_config
 
 
 class GpuLearnedObservationL1Tests(unittest.TestCase):
@@ -34,6 +38,81 @@ class GpuLearnedObservationL1Tests(unittest.TestCase):
         self.assertEqual(L1_IDS, TRAIN_IDS + VALIDATION_IDS)
         self.assertEqual(L1_IDS, tuple(self.config["dataset"]["l1_permitted_ids"]))
         self.assertEqual(EXPECTED_STRUCTURE["block_count"], 30)
+
+    def test_preflight_adapter_adds_only_frozen_helper_fields_without_mutation(self) -> None:
+        original = copy.deepcopy(self.config)
+        original_digest = sha256_bytes(canonical_json_bytes(self.config))
+        adapted = _build_internal_preflight_config(self.config)
+        self.assertEqual(self.config, original)
+        self.assertEqual(original_digest, CONFIG_CANONICAL_SHA256)
+        self.assertEqual(sha256_bytes(canonical_json_bytes(self.config)), CONFIG_CANONICAL_SHA256)
+        added = set(adapted["carrier"]) - set(self.config["carrier"])
+        self.assertEqual(added, {"required_runtime_dtype", "gain_solver_max_iterations"})
+        self.assertEqual(adapted["carrier"]["required_runtime_dtype"], "torch.bfloat16")
+        self.assertEqual(adapted["carrier"]["gain_solver_max_iterations"], 12)
+        for key in self.config["carrier"]:
+            self.assertEqual(adapted["carrier"][key], self.config["carrier"][key])
+        for forbidden_key, value in (("required_runtime_dtype", "torch.bfloat16"), ("gain_solver_max_iterations", 12)):
+            changed = copy.deepcopy(self.config)
+            changed["carrier"][forbidden_key] = value
+            with self.assertRaises(Exception):
+                validate_learned_observation_config(changed)
+
+    def test_preflight_adapter_passes_literal_contract_and_actual_dtype_argument(self) -> None:
+        fake_dtype = object()
+        fake_torch = mock.Mock(bfloat16=fake_dtype)
+        with mock.patch("src.sc_sstw_feasibility.gpu_learned_observation_l1.run_internal_preflight", return_value={"passed": True, "records": []}) as helper:
+            result = _run_internal_preflight_adapter(fake_torch, self.config)
+        self.assertTrue(result["passed"])
+        received_torch, received_config, received_dtype = helper.call_args.args
+        self.assertIs(received_torch, fake_torch)
+        self.assertIs(received_dtype, fake_dtype)
+        added = set(received_config["carrier"]) - set(self.config["carrier"])
+        self.assertEqual(added, {"required_runtime_dtype", "gain_solver_max_iterations"})
+        self.assertEqual(received_config["carrier"]["required_runtime_dtype"], "torch.bfloat16")
+        self.assertEqual(received_config["carrier"]["gain_solver_max_iterations"], 12)
+
+    def test_preflight_failure_or_exception_blocks_model_generation_and_training(self) -> None:
+        expected_commit = "a" * 40
+        fake_torch = mock.Mock()
+        fake_torch.bfloat16 = object()
+        fake_torch.__version__ = "2.6.0+cu124"
+        fake_torch.version = mock.Mock(cuda="12.4")
+        fake_torch.cuda.get_device_name.return_value = "NVIDIA A100-SXM4-40GB"
+        model_load = mock.Mock()
+        runtime = {
+            "torch": fake_torch,
+            "versions": GPU_SOFTWARE,
+            "imageio_ffmpeg": mock.Mock(get_ffmpeg_version=mock.Mock(return_value="6.1")),
+            "WanPipeline": mock.Mock(from_pretrained=model_load),
+            "model_info": mock.Mock(return_value=mock.Mock(sha=self.config["model"]["revision"])),
+        }
+        def fake_git(_repo, *args):
+            if args == ("rev-parse", "HEAD"):
+                return expected_commit
+            if args == ("status", "--porcelain"):
+                return ""
+            if args == ("remote", "get-url", "origin"):
+                return "git@example.invalid/repo.git"
+            raise AssertionError(args)
+        outcomes = ({"passed": False, "records": [], "reason": "forced"}, RuntimeError("forced helper exception"))
+        for outcome in outcomes:
+            model_load.reset_mock()
+            with tempfile.TemporaryDirectory() as tmpdir:
+                output = Path(tmpdir) / "run"
+                preflight_patch = mock.patch("src.sc_sstw_feasibility.gpu_learned_observation_l1.run_internal_preflight")
+                with preflight_patch as preflight, mock.patch("src.sc_sstw_feasibility.gpu_learned_observation_l1._runtime_imports", return_value=runtime), mock.patch("src.sc_sstw_feasibility.gpu_learned_observation_l1._git", side_effect=fake_git), mock.patch("src.sc_sstw_feasibility.gpu_learned_observation_l1._binary_version", return_value="version"), mock.patch("src.sc_sstw_feasibility.gpu_learned_observation_l1.generate_l1_video") as generate, mock.patch("src.sc_sstw_feasibility.gpu_learned_observation_l1.train_public_relation_frontend") as train:
+                    if isinstance(outcome, Exception):
+                        preflight.side_effect = outcome
+                    else:
+                        preflight.return_value = outcome
+                    with self.assertRaises((LearnedObservationL1Error, RuntimeError)):
+                        run_gpu_learned_observation_l1(self.config_path, output, expected_commit)
+                model_load.assert_not_called()
+                generate.assert_not_called()
+                train.assert_not_called()
+        source = (ROOT / "src" / "sc_sstw_feasibility" / "gpu_learned_observation_l1.py").read_text(encoding="utf-8")
+        self.assertLess(source.index("_run_internal_preflight_adapter(torch, config)"), source.index('runtime["WanPipeline"].from_pretrained'))
 
     def test_persisted_injection_record_validator_is_fail_closed(self) -> None:
         records = []

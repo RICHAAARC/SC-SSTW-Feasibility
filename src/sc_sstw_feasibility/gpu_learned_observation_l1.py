@@ -463,6 +463,21 @@ def _runtime_imports() -> dict[str, Any]:
     return modules
 
 
+def _build_internal_preflight_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Add only the two frozen fields required by the historical helper API."""
+
+    validate_learned_observation_config(config)
+    adapted = copy.deepcopy(config)
+    adapted["carrier"]["required_runtime_dtype"] = "torch.bfloat16"
+    adapted["carrier"]["gain_solver_max_iterations"] = 12
+    return adapted
+
+
+def _run_internal_preflight_adapter(torch: Any, config: dict[str, Any]) -> dict[str, Any]:
+    adapted = _build_internal_preflight_config(config)
+    return run_internal_preflight(torch, adapted, torch.bfloat16)
+
+
 def run_gpu_learned_observation_l1(config_path: Path, output_dir: Path, expected_commit: str) -> dict[str, Any]:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     validate_learned_observation_config(config)
@@ -498,9 +513,7 @@ def run_gpu_learned_observation_l1(config_path: Path, output_dir: Path, expected
         "model_revision_resolved": resolved_revision,
     })
     (output_dir / "command.txt").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")
-    preflight_config = copy.deepcopy(config)
-    preflight_config["carrier"]["gain_solver_max_iterations"] = 12
-    preflight = run_internal_preflight(torch, preflight_config, torch.bfloat16)
+    preflight = _run_internal_preflight_adapter(torch, config)
     _write(artifacts / "effective_delta_preflight.json", preflight)
     if not preflight["passed"]:
         raise LearnedObservationL1Error("internal effective-delta preflight failed")
