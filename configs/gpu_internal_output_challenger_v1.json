@@ -1,0 +1,123 @@
+{
+  "protocol_id": "sc_sstw_gpu_internal_output_challenger_v1",
+  "claim_scope": "real_wan_internal_attention_output_public_relation_propagation_bridge_only",
+  "history_lock": {
+    "direct_v2_commit": "9c1be010353367f0ee1a95afc372999dafbaf812",
+    "direct_v2_drive_run": "gpu_carrier_propagation_v2/20260807T010521Z_9c1be010",
+    "direct_v2_archive_sha256": "5b4e8bf820dc7e12f0eed2520e88098a3d3a0c1b7b3e01ec178337e7f4d08b26",
+    "direct_v2_conclusion": "NO_GO",
+    "overall_method_conclusion": "NOT_DETERMINED"
+  },
+  "forbidden_claims": [
+    "calibration_pass",
+    "held_out_pass",
+    "method_pass",
+    "owner_wrong_key_pass",
+    "paired_or_internal_diagnostic_as_blind_observation",
+    "temporal_edit_pass"
+  ],
+  "generation": {
+    "fps": 8,
+    "frame_count": 49,
+    "guidance_scale": 5.0,
+    "height": 320,
+    "inference_steps": 8,
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple subjects, flicker",
+    "prompt": "locked camera, dark matte background, a single bright white cube moving slowly across the center, simple studio lighting, no text, no cuts",
+    "seed": 1275,
+    "width": 512
+  },
+  "carrier": {
+    "kind": "dit_internal_self_attention_output_residual",
+    "module_path": "transformer.blocks[29].attn1",
+    "block_index": 29,
+    "expected_transformer_type": "WanTransformer3DModel",
+    "expected_block_type": "WanTransformerBlock",
+    "expected_attention_type": "WanAttention",
+    "expected_block_count": 30,
+    "expected_patch_size": [1, 2, 2],
+    "expected_patch_embedding_shape": [1, 1536, 13, 20, 32],
+    "expected_token_grid": [13, 20, 32],
+    "expected_internal_dim": 1536,
+    "expected_hook_output_shape": [1, 8320, 1536],
+    "token_order": "index=((t*20)+h)*32+w_width_fastest_c_order",
+    "basis_formula_x": "sqrt(2)*cos(2*pi*(w+0.5)/32)_all_t_h_d",
+    "basis_formula_y": "sqrt(2)*cos(2*pi*(h+0.5)/20)_all_t_w_d",
+    "required_runtime_dtype": "torch.bfloat16",
+    "hook_mode": "forward_output_replacement_new_tensor",
+    "apply_to": "8_steps_each_cond_then_uncond_16_calls",
+    "expected_branch_sequence": [
+      "step_0_cond", "step_0_uncond", "step_1_cond", "step_1_uncond",
+      "step_2_cond", "step_2_uncond", "step_3_cond", "step_3_uncond",
+      "step_4_cond", "step_4_uncond", "step_5_cond", "step_5_uncond",
+      "step_6_cond", "step_6_uncond", "step_7_cond", "step_7_uncond"
+    ],
+    "expected_timestep_values": [999, 999, 954, 954, 899, 899, 832, 832, 749, 749, 642, 642, 499, 499, 299, 299],
+    "gain_solver": "deterministic_effective_delta_multiplicative_correction",
+    "gain_solver_max_iterations": 12,
+    "in_place_mutation_permitted": false,
+    "processor_or_qkv_mutation_permitted": false,
+    "scheduler_mutation_permitted": false,
+    "guidance_or_final_output_carrier_permitted": false,
+    "target_relative_rms": 0.03,
+    "target_relative_rms_absolute_tolerance": 0.00005,
+    "temporal_points": [
+      [0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.25, 0.35], [0.75, 0.2], [0.2, 0.8],
+      [-0.9238795325, 0.3826834324], [0.3826834324, 0.9238795325],
+      [-0.3826834324, -0.9238795325], [0.9238795325, -0.3826834324],
+      [-0.7071067812, 0.7071067812], [0.7071067812, 0.7071067812], [0.0, -1.0]
+    ],
+    "temporal_point_roles": [
+      "public_aisb_anchor_0", "public_aisb_anchor_1", "public_aisb_anchor_2",
+      "public_aisb_checksum_3", "public_aisb_checksum_4", "public_aisb_checksum_5",
+      "propagation_probe_6", "propagation_probe_7", "propagation_probe_8",
+      "propagation_probe_9", "propagation_probe_10", "propagation_probe_11",
+      "propagation_probe_12"
+    ]
+  },
+  "diagnostic_readouts": {
+    "actual_internal_effective_delta": "diagnostic_only_never_blind_pass",
+    "paired_final_transformer_output": "diagnostic_only_never_blind_pass",
+    "paired_latent_callback": "diagnostic_only_never_blind_pass",
+    "clean_watermarked_paired_rgb_pre_mp4_difference": "diagnostic_only_never_blind_pass",
+    "clean_watermarked_paired_mp4_difference": "diagnostic_only_never_blind_pass",
+    "saved_mp4_blind_front_end": "single_watermarked_mp4_luma_cosine_projection_key_independent",
+    "temporal_frame_groups": [[0], [1,2,3,4], [5,6,7,8], [9,10,11,12], [13,14,15,16], [17,18,19,20], [21,22,23,24], [25,26,27,28], [29,30,31,32], [33,34,35,36], [37,38,39,40], [41,42,43,44], [45,46,47,48]]
+  },
+  "relation_thresholds": {
+    "maximum_public_aisb_residual": 0.25,
+    "maximum_public_condition_number": 10.0
+  },
+  "model": {
+    "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"
+  },
+  "pass_conditions": {
+    "all_injection_records_finite": true,
+    "blind_saved_mp4_observation_finite_13_by_2": true,
+    "blind_saved_mp4_public_aisb_residual_at_most_0_25": true,
+    "blind_saved_mp4_public_condition_number_at_most_10": true,
+    "call_sequence_cond_then_uncond_for_8_steps": true,
+    "clean_and_watermarked_mp4_each_have_49_frames": true,
+    "effective_delta_preflight_16_of_16": true,
+    "exact_commit_required": true,
+    "hook_output_shape_and_dtype_16_of_16": true,
+    "internal_attn1_output_injection_used": true,
+    "latent_callback_shape_is_1_16_13_40_64": true,
+    "model_revision_and_structure_exact": true,
+    "original_attention_output_tensor_version_unchanged": true,
+    "paired_diagnostics_finite": true,
+    "patch_embedding_to_block0_value_mapping_exact_32_of_32": true,
+    "repository_clean": true,
+    "residual_q_reconstruction_mse_at_most_0_0001": true,
+    "scheduler_mutation_absent": true,
+    "target_relative_rms_within_tolerance_16_of_16": true,
+    "target_attention_processor_and_qkvout_parameters_unchanged": true
+  },
+  "python_version_policy": "record_only_not_locked_by_repository",
+  "software": {
+    "accelerate": "1.4.0", "diffusers": "0.35.2", "ftfy": "6.3.1",
+    "imageio": "2.37.0", "imageio_ffmpeg": "0.6.0", "safetensors": "0.5.3",
+    "transformers": "4.49.0"
+  }
+}
