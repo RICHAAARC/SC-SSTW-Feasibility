@@ -68,6 +68,25 @@ formal notebook requires a production-only manifest and never supplies the
 synthetic flag. Decoder or extractor unavailability is invalid; there is no
 fallback to cached or synthetic features.
 
+Production validation is closed to external execution packages. A production
+`RC1_VALID_PASS` or `RC1_VALID_FAIL` can only follow `--generate` in the same
+controlled runner process. The generation module returns an opaque, single-use
+in-memory receipt directly to the validator; mappings, JSON, deserialized
+objects, replayed receipts, and package declarations cannot recreate that
+capability. The receipt binds the clean preflight/source identity, actually
+loaded model/runtime/scheduler identity, actual initial latent and per-condition
+clone identities, ordered hook observations, and saved-video completion and
+digests. The validator consumes it before reading `execution.json`, then checks
+the receipt against every disk identity before retaining the existing MP4
+probe/decode, frozen-feature recomputation, and cache comparison.
+
+This is a local process-topology trust boundary only: the exact clean source's
+runner observed its own generation call. It does not establish hardware
+identity, remote origin, or cryptographic authenticity. External
+execution packages are admitted solely in explicit `--synthetic-fixture` mode
+and remain nonformal, test-only evidence. The formal notebook invokes only
+`--generate`; it has no external production-package topology.
+
 ### Blind evaluator
 
 The frozen selected frontend/readout maps each single saved MP4 to one 13×2

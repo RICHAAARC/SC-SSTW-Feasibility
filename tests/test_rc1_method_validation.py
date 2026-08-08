@@ -5,6 +5,8 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import pickle
+import runpy
 import shutil
 import subprocess
 import sys
@@ -14,6 +16,10 @@ import numpy as np
 import pytest
 
 from src.sc_sstw_feasibility.learned_observation import decode_saved_mp4, extract_feature_matrix
+from src.sc_sstw_feasibility.rc1_gpu_generation import (
+    GenerationReceipt,
+    run_gpu_generation,
+)
 
 from src.sc_sstw_feasibility.learned_observation_l1_v2 import (
     ABSOLUTE_THRESHOLDS,
@@ -348,6 +354,81 @@ def _production_environment(config: dict[str, object]) -> dict[str, object]:
     }
 
 
+class _CPUOnlyGenerationBackend:
+    """Deterministic adapter that exercises production control flow without GPU."""
+
+    def __init__(self, *, corrupt_video: bool = False, real_mp4: bool = False) -> None:
+        self.corrupt_video = corrupt_video
+        self.real_mp4 = real_mp4
+
+    def load_environment(self, frozen: object) -> dict[str, object]:
+        environment = _production_environment(frozen.config)
+        environment["runtime"]["gpu"] = "CPU-only control-flow harness"
+        environment["runtime"]["cuda"] = "CPU-harness-no-CUDA"
+        return environment
+
+    def prepare_initial_latents(self, parameters: dict[str, object]) -> np.ndarray:
+        return np.random.default_rng(int(parameters["seed"])).normal(size=(1, 4, 2, 2)).astype(np.float32)
+
+    def loaded_identity(self, frozen: object, environment: dict[str, object]) -> dict[str, object]:
+        return {
+            "model_id": frozen.config["model"]["id"],
+            "loaded_revision": frozen.config["model"]["revision"],
+            "scheduler": environment["scheduler"],
+            "dtype": "torch.bfloat16",
+            "device": "cpu-only-harness",
+        }
+
+    def latent_identity(self, latent: np.ndarray) -> dict[str, object]:
+        envelope = canonical_json_bytes({"shape": list(latent.shape), "dtype": str(latent.dtype)}) + latent.tobytes()
+        return {"sha256": sha256_bytes(envelope), "shape": list(latent.shape), "dtype": str(latent.dtype)}
+
+    def generate_condition(self, frozen: object, parameters: dict[str, object], initial_latent: np.ndarray, condition: str, video_path: Path) -> dict[str, object]:
+        identity = self.latent_identity(initial_latent)
+        if self.corrupt_video and condition == "OFF":
+            video_path.write_text("corrupt CPU harness MP4", encoding="utf-8")
+            features = np.zeros((13, 30), dtype=np.float64).tolist()
+            codec = {"container": "mp4", "codec_name": "h264", "pixel_format": "yuv420p", "width": 512, "height": 320, "fps": "8/1", "frame_count": 49, "decodable": True}
+        elif self.real_mp4:
+            _write_runtime_mp4(video_path)
+            features = extract_feature_matrix(decode_saved_mp4(video_path))
+            codec = {"container": "mp4", "codec_name": "h264", "pixel_format": "yuv420p", "width": 512, "height": 320, "fps": "8/1", "frame_count": 49, "decodable": True}
+        else:
+            video_path.write_bytes(b"CPU-only receipt-path sentinel")
+            features = np.zeros((13, 30), dtype=np.float64).tolist()
+            codec = {"container": "mp4", "codec_name": "h264", "pixel_format": "yuv420p", "width": 512, "height": 320, "fps": "8/1", "frame_count": 49, "decodable": True}
+        schedule = schedule_a() if condition == "A" else schedule_b()
+        schedule_sha = sha256_bytes(canonical_json_bytes(schedule))
+        records = [] if condition == "OFF" else [
+            {
+                "call_index": index,
+                "module_path": frozen.config["carrier"]["module_path"],
+                "schedule_sha256": schedule_sha,
+                "output_shape": [2, 21, 9600, 1536],
+                "output_dtype": "torch.bfloat16",
+                "input_tensor_sha256": sha256_bytes(f"input:{condition}:{index}".encode()),
+                "modified_tensor_sha256": sha256_bytes(f"modified:{condition}:{index}".encode()),
+                "distinct_storage": True,
+                "effective_relative_rms": frozen.config["carrier"]["target_relative_rms"],
+                "evidence_mode": EVIDENCE_PRODUCTION,
+            }
+            for index in range(16)
+        ]
+        return {
+            "carrier_records": records,
+            "features": features,
+            "initial_latent_identity": identity,
+            "condition_latent_identity": dict(identity),
+            "codec_identity": codec,
+            "video_saved_complete": True,
+            "video_sha256": sha256_file(video_path),
+        }
+
+
+def _make_receipted_production_execution(path: Path, frozen: object, *, corrupt_video: bool = False, real_mp4: bool = False):
+    return run_gpu_generation(frozen, path, [RUNNER_PATH, "--generate"], _test_backend=_CPUOnlyGenerationBackend(corrupt_video=corrupt_video, real_mp4=real_mp4))
+
+
 def _make_production_execution(path: Path, frozen: object) -> Path:
     template = path.parent / "runtime-generated-template.mp4"
     _write_runtime_mp4(template)
@@ -482,18 +563,94 @@ def test_valid_synthetic_execution_scans_every_case_without_averaging(environmen
 
 
 def test_production_saved_mp4_is_decoded_recomputed_and_enters_evaluator(environment: dict[str, object], tmp_path: Path) -> None:
-    record_path = _make_production_execution(tmp_path / "production-execution", environment["frozen"])
-    record, artifacts = validate_execution_record(record_path, environment["frozen"], synthetic_fixture=False)
+    outcome = _make_receipted_production_execution(tmp_path / "production-execution", environment["frozen"], real_mp4=True)
+    record_path = outcome.record_path
+    record, artifacts = validate_execution_record(
+        record_path,
+        environment["frozen"],
+        synthetic_fixture=False,
+        generation_receipt=outcome.receipt,
+        allow_cpu_test_harness=True,
+    )
     groups, passed = evaluate_execution(record, record_path, artifacts, environment["frozen"], synthetic_fixture=False)
     assert passed is False
     assert len(groups) == 2
     assert record["evidence_mode"] == EVIDENCE_PRODUCTION
 
 
+def _mutate_receipt_snapshot(receipt: GenerationReceipt, mutate) -> None:
+    snapshot = json.loads(receipt._snapshot)
+    mutate(snapshot)
+    object.__setattr__(receipt, "_snapshot", canonical_json_bytes(snapshot))
+
+
+@pytest.mark.parametrize("fake_receipt", [None, {}, {"completed": True}, SimpleNamespace(completed=True)])
+def test_production_validator_rejects_missing_mapping_or_object_receipt_before_read(environment: dict[str, object], tmp_path: Path, fake_receipt: object) -> None:
+    sentinel = tmp_path / "unreadable-sentinel" / "execution.json"
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(sentinel, environment["frozen"], synthetic_fixture=False, generation_receipt=fake_receipt)
+    assert _reason(caught) == "GENERATION_RECEIPT_INVALID"
+
+
+def test_generation_receipt_is_single_use_and_cpu_harness_requires_explicit_internal_admission(environment: dict[str, object], tmp_path: Path) -> None:
+    outcome = _make_receipted_production_execution(tmp_path / "receipt-replay", environment["frozen"])
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(outcome.record_path, environment["frozen"], synthetic_fixture=False, generation_receipt=outcome.receipt)
+    assert _reason(caught) == "CPU_TEST_HARNESS_FORBIDDEN"
+    with pytest.raises(InvalidExperiment) as replayed:
+        validate_execution_record(outcome.record_path, environment["frozen"], synthetic_fixture=False, generation_receipt=outcome.receipt, allow_cpu_test_harness=True)
+    assert _reason(replayed) == "GENERATION_RECEIPT_INVALID"
+
+
+def test_generation_receipt_has_no_public_constructor_and_deserialized_copy_is_invalid(environment: dict[str, object], tmp_path: Path) -> None:
+    with pytest.raises(TypeError):
+        GenerationReceipt()
+    outcome = _make_receipted_production_execution(tmp_path / "receipt-deserialization", environment["frozen"])
+    with pytest.raises(TypeError):
+        pickle.dumps(outcome.receipt)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (lambda value: value["preflight"].update(manifest_sha256="f" * 64), "GENERATION_RECEIPT_IDENTITY_MISMATCH"),
+        (lambda value: value["preflight"].update(source_head="f" * 40), "GENERATION_RECEIPT_IDENTITY_MISMATCH"),
+        (lambda value: value["preflight"].update(config_sha256="f" * 64), "GENERATION_RECEIPT_IDENTITY_MISMATCH"),
+        (lambda value: value["preflight"].update(plan_sha256="f" * 64), "GENERATION_RECEIPT_IDENTITY_MISMATCH"),
+        (lambda value: value["preflight"].update(prerequisite_identity={}), "GENERATION_RECEIPT_IDENTITY_MISMATCH"),
+        (lambda value: value["implementation"].update(generation_module_sha256="f" * 64), "GENERATION_RECEIPT_IDENTITY_MISMATCH"),
+        (lambda value: value["loaded_identity"].update(loaded_revision="f" * 40), "GENERATION_RECEIPT_RUNTIME_MISMATCH"),
+        (lambda value: value["loaded_identity"].update(dtype="torch.float32"), "GENERATION_RECEIPT_RUNTIME_MISMATCH"),
+        (lambda value: value["loaded_identity"].update(scheduler={}), "GENERATION_RECEIPT_RUNTIME_MISMATCH"),
+        (lambda value: value["environment"]["runtime"].update(torch="0.0"), "GENERATION_RECEIPT_RUNTIME_MISMATCH"),
+        (lambda value: value["environment"]["scheduler"].update(config_sha256="f" * 64), "GENERATION_RECEIPT_RUNTIME_MISMATCH"),
+        (lambda value: value["groups"][0]["initial_latent_identity"].update(sha256="f" * 64), "GENERATION_RECEIPT_LATENT_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][1]["condition_latent_identity"].update(sha256="f" * 64), "GENERATION_RECEIPT_LATENT_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][0].update(carrier_hook_effect=True), "GENERATION_RECEIPT_HOOK_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][1]["carrier_records"][0].update(call_index=99), "GENERATION_RECEIPT_HOOK_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][1]["carrier_records"].pop(), "GENERATION_RECEIPT_HOOK_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][1]["carrier_records"][0].update(schedule_sha256="f" * 64), "GENERATION_RECEIPT_HOOK_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][1]["carrier_records"][0].update(output_shape=[1]), "GENERATION_RECEIPT_HOOK_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][1]["carrier_records"][0].update(output_dtype="torch.float32"), "GENERATION_RECEIPT_HOOK_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][1]["carrier_records"][0].update(effective_relative_rms=0.0), "GENERATION_RECEIPT_HOOK_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][1]["carrier_records"][0].update(input_tensor_sha256="f" * 64), "GENERATION_RECEIPT_HOOK_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][0].update(video_saved_complete=False), "GENERATION_RECEIPT_VIDEO_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][0].update(video_sha256="f" * 64), "GENERATION_RECEIPT_VIDEO_MISMATCH"),
+        (lambda value: value["groups"][0]["conditions"][0].update(codec_identity={}), "GENERATION_RECEIPT_VIDEO_MISMATCH"),
+    ],
+)
+def test_generation_receipt_to_disk_tamper_matrix_is_invalid(environment: dict[str, object], tmp_path: Path, mutation, reason: str) -> None:
+    outcome = _make_receipted_production_execution(tmp_path / f"receipt-tamper-{reason}-{id(mutation)}", environment["frozen"])
+    _mutate_receipt_snapshot(outcome.receipt, mutation)
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(outcome.record_path, environment["frozen"], synthetic_fixture=False, generation_receipt=outcome.receipt, allow_cpu_test_harness=True)
+    assert _reason(caught) == reason
+
+
 def test_test_only_synthetic_cannot_masquerade_as_production(environment: dict[str, object]) -> None:
     with pytest.raises(InvalidExperiment) as caught:
         validate_execution_record(environment["execution_path"], environment["frozen"], synthetic_fixture=False)
-    assert _reason(caught) == "EXECUTION_MODE_MISMATCH"
+    assert _reason(caught) == "GENERATION_RECEIPT_INVALID"
 
 
 @pytest.mark.parametrize(
@@ -519,7 +676,8 @@ def test_saved_mp4_decoder_rejects_invalid_container_codec_and_geometry(tmp_path
 
 @pytest.mark.parametrize("tamper", ["stored_features", "extractor_identity", "plain_text_video"])
 def test_production_feature_cache_and_video_tampering_are_invalid(environment: dict[str, object], tmp_path: Path, tamper: str) -> None:
-    record_path = _make_production_execution(tmp_path / f"production-{tamper}", environment["frozen"])
+    outcome = _make_receipted_production_execution(tmp_path / f"production-{tamper}", environment["frozen"])
+    record_path = outcome.record_path
     record = json.loads(record_path.read_text())
     condition = record["groups"][0]["conditions"][0]
     feature_path = record_path.parent / condition["artifacts"]["features"]["path"]
@@ -539,15 +697,15 @@ def test_production_feature_cache_and_video_tampering_are_invalid(environment: d
         _write_json(feature_path, payload)
     condition["artifacts"]["features"]["sha256"] = sha256_file(feature_path)
     _write_json(record_path, record)
-    validated, artifacts = validate_execution_record(record_path, environment["frozen"], synthetic_fixture=False)
     with pytest.raises(InvalidExperiment) as caught:
-        evaluate_execution(validated, record_path, artifacts, environment["frozen"], synthetic_fixture=False)
-    expected = {
-        "stored_features": "FEATURE_CACHE_RECOMPUTE_MISMATCH",
-        "extractor_identity": "FEATURE_EXTRACTOR_IDENTITY_MISMATCH",
-        "plain_text_video": "SAVED_MP4_INVALID",
-    }
-    assert _reason(caught) == expected[tamper]
+        validate_execution_record(
+            record_path,
+            environment["frozen"],
+            synthetic_fixture=False,
+            generation_receipt=outcome.receipt,
+            allow_cpu_test_harness=True,
+        )
+    assert _reason(caught) == "GENERATION_RECEIPT_DISK_MISMATCH"
 
 
 def test_missing_prerequisite_is_not_invalid_and_precedes_generation_access(tmp_path: Path) -> None:
@@ -842,10 +1000,46 @@ def test_cli_real_path_emits_pass_fail_invalid_and_prerequisite_packages(environ
     assert completed.returncode == 3 and failed["status"] == STATUS_FAIL
 
     passing = json.loads((pass_output / "audit.json").read_text())
+    assert passing["test_only_synthetic"] is True
+    assert passing["generation_trust_boundary"] == "external_test_only_synthetic_fixture"
     for audit in (passing, missing, invalid, failed):
         assert audit["formal_result"] is False and audit["stage_progression_allowed"] is False
     assert passing["conclusion"] == PASS_CONCLUSION
     assert not any(token in json.dumps(passing).lower() for token in FORBIDDEN_CLAIM_TOKENS)
+
+
+def test_cpu_only_backend_traverses_real_runner_generation_receipt_decode_and_evaluator(environment: dict[str, object], tmp_path: Path) -> None:
+    runner = environment["repo"] / RUNNER_PATH
+    module = runpy.run_path(str(runner), run_name="rc1_cpu_only_control_flow")
+    output = tmp_path / "cpu-harness-runner-output"
+    result = module["main"](
+        ["--manifest", str(environment["manifest_path"]), "--output", str(output), "--source-commit", environment["head"], "--generate"],
+        _test_generation_backend=_CPUOnlyGenerationBackend(real_mp4=True),
+    )
+    audit = json.loads((output / "audit.json").read_text())
+    assert result in {0, 3}
+    assert audit["status"] in {STATUS_PASS, STATUS_FAIL}
+    assert audit["cpu_only_test_harness"] is True
+    assert audit["generation_trust_boundary"] == "cpu_only_control_flow_harness"
+    assert audit["formal_result"] is False and audit["stage_progression_allowed"] is False
+    assert len(audit["groups"]) == 2
+    assert all(len(group["conditions"]) == 3 for group in audit["groups"])
+
+
+def test_cpu_only_backend_decoder_failure_is_packaged_as_invalid(environment: dict[str, object], tmp_path: Path) -> None:
+    runner = environment["repo"] / RUNNER_PATH
+    module = runpy.run_path(str(runner), run_name="rc1_cpu_only_decoder_failure")
+    output = tmp_path / "cpu-harness-decoder-invalid"
+    result = module["main"](
+        ["--manifest", str(environment["manifest_path"]), "--output", str(output), "--source-commit", environment["head"], "--generate"],
+        _test_generation_backend=_CPUOnlyGenerationBackend(corrupt_video=True),
+    )
+    audit = json.loads((output / "audit.json").read_text())
+    assert result == 2
+    assert audit["status"] == STATUS_INVALID
+    assert audit["reason_code"] in {"SAVED_MP4_INVALID", "SAVED_MP4_DECODE_OR_EXTRACT_FAILURE"}
+    assert audit["science_metrics_present"] is False
+    assert "groups" not in audit and "conclusion" not in audit
 
 
 @pytest.mark.parametrize(
@@ -900,22 +1094,13 @@ def test_cli_does_not_overwrite_existing_output_and_uses_invalid_fallback(enviro
     assert audit["science_metrics_present"] is False
 
 
-def test_real_cli_packages_decoder_error_without_science_metrics(environment: dict[str, object], tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_unreadable_sentinel", [False, True])
+def test_external_production_package_is_rejected_before_any_package_read(environment: dict[str, object], tmp_path: Path, use_unreadable_sentinel: bool) -> None:
     record_path = _make_production_execution(tmp_path / "decoder-cli-execution", environment["frozen"])
-    record = json.loads(record_path.read_text())
-    condition = record["groups"][0]["conditions"][0]
-    video_path = record_path.parent / condition["artifacts"]["video"]["path"]
-    feature_path = record_path.parent / condition["artifacts"]["features"]["path"]
-    video_path.write_text("corrupt saved MP4", encoding="utf-8")
-    condition["artifacts"]["video"]["sha256"] = sha256_file(video_path)
-    features = json.loads(feature_path.read_text())
-    features["video_sha256"] = sha256_file(video_path)
-    _write_json(feature_path, features)
-    condition["artifacts"]["features"]["sha256"] = sha256_file(feature_path)
-    _write_json(record_path, record)
+    supplied_path = tmp_path / "must-not-be-opened" / "execution.json" if use_unreadable_sentinel else record_path
     output = tmp_path / "decoder-cli-output"
     completed = subprocess.run(
-        [sys.executable, "-B", str(environment["repo"] / RUNNER_PATH), "--manifest", str(environment["manifest_path"]), "--output", str(output), "--source-commit", environment["head"], "--execution-package", str(record_path)],
+        [sys.executable, "-B", str(environment["repo"] / RUNNER_PATH), "--manifest", str(environment["manifest_path"]), "--output", str(output), "--source-commit", environment["head"], "--execution-package", str(supplied_path)],
         cwd=environment["repo"],
         text=True,
         capture_output=True,
@@ -923,10 +1108,10 @@ def test_real_cli_packages_decoder_error_without_science_metrics(environment: di
     assert completed.returncode == 2, completed.stderr
     audit = json.loads((output / "audit.json").read_text())
     assert audit["status"] == STATUS_INVALID
-    assert audit["reason_code"] == "SAVED_MP4_INVALID"
+    assert audit["reason_code"] == "EXTERNAL_PRODUCTION_PACKAGE_FORBIDDEN"
     assert audit["science_metrics_present"] is False
     assert "groups" not in audit and "conclusion" not in audit
-    assert audit["integrity_context"]["failure_phase"] == "saved_mp4_decode_and_evaluation"
+    assert audit["integrity_context"]["failure_phase"] == "execution_entry"
 
 
 def test_status_vocabulary_claim_ceiling_and_notebook_static_structure() -> None:
@@ -941,6 +1126,7 @@ def test_status_vocabulary_claim_ceiling_and_notebook_static_structure() -> None
         "--generate", "synthetic_fixture_permitted': False", "try:", "finally:", "make_archive", "shutil.copy2", "sha256(drive_copy)", "testzip()", "verification.json", "packaged = True",
     )
     assert all(token in source for token in required)
+    assert "--execution-package" not in source
     assert "checkout exact ref" not in source.lower()
     for cell in notebook["cells"]:
         if cell["cell_type"] == "code":

@@ -103,7 +103,7 @@ def _unexpected_error(error: Exception) -> InvalidExperiment:
     return InvalidExperiment("UNEXPECTED_RUNTIME_FAILURE", "ordinary runtime failure")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, _test_generation_backend: Any | None = None) -> int:
     arguments = _parser().parse_args(argv)
     command = [str(Path(sys.argv[0]).name), *(argv if argv is not None else sys.argv[1:])]
     context: dict[str, Any] = {}
@@ -136,18 +136,37 @@ def main(argv: list[str] | None = None) -> int:
             from src.sc_sstw_feasibility.rc1_gpu_generation import RC1GPUGenerationError, run_gpu_generation
 
             try:
-                execution_path = run_gpu_generation(frozen, package_root / "generation", command)
+                outcome = run_gpu_generation(frozen, package_root / "generation", command, _test_backend=_test_generation_backend)
+                execution_path = outcome.record_path
+                generation_receipt = outcome.receipt
             except RC1GPUGenerationError as exc:
                 raise InvalidExperiment("GENERATION_INTEGRITY_FAILURE", "GPU generation helper failed integrity") from exc
         elif arguments.execution_package is not None:
+            phase = "execution_entry"
+            if not arguments.synthetic_fixture:
+                raise InvalidExperiment("EXTERNAL_PRODUCTION_PACKAGE_FORBIDDEN", "production execution must originate in this runner process via --generate")
             execution_path = arguments.execution_package.resolve()
+            generation_receipt = None
         else:
             raise PrerequisiteNotMet("EXECUTION_PACKAGE_NOT_PROVIDED", "preflight passed but no fresh matched-triplet execution was supplied")
         phase = "execution_package_validation"
-        record, artifacts = validate_execution_record(execution_path, frozen, synthetic_fixture=arguments.synthetic_fixture)
+        record, artifacts = validate_execution_record(
+            execution_path,
+            frozen,
+            synthetic_fixture=arguments.synthetic_fixture,
+            generation_receipt=generation_receipt,
+            allow_cpu_test_harness=_test_generation_backend is not None,
+        )
         phase = "saved_mp4_decode_and_evaluation"
         group_results, passed = evaluate_execution(record, execution_path, artifacts, frozen, synthetic_fixture=arguments.synthetic_fixture)
-        audit = valid_audit(frozen, record, sha256_file(execution_path), group_results, passed)
+        audit = valid_audit(
+            frozen,
+            record,
+            sha256_file(execution_path),
+            group_results,
+            passed,
+            cpu_only_test_harness=_test_generation_backend is not None,
+        )
         exit_code = 0 if audit["status"] == STATUS_PASS else 3
     except PrerequisiteNotMet as exc:
         audit = prerequisite_audit(exc, {**context, "failure_phase": phase, "exception_type": type(exc).__name__})

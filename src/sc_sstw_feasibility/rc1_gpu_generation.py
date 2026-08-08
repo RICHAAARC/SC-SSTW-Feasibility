@@ -7,6 +7,7 @@ never selects a candidate or derives a threshold from fresh videos.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import platform
@@ -26,6 +27,7 @@ from .rc1_method_validation import (
     FEATURE_CACHE_SCHEMA,
     FEATURE_EXTRACTOR_ID,
     EXTRACTOR_LIBRARY_PATH,
+    GPU_LIBRARY_PATH,
     PLAN_RAW_SHA256,
     PRODUCTION_EVIDENCE_SCHEMA,
     PROTOCOL_ID,
@@ -44,6 +46,56 @@ from .rc1_method_validation import (
 
 class RC1GPUGenerationError(RuntimeError):
     """Raised when generation cannot preserve the frozen matched-triplet contract."""
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GenerationReceipt:
+    """Opaque, same-process generation capability; it is never serialized."""
+
+    _seal: object
+    _snapshot: bytes
+
+    def __new__(cls) -> "GenerationReceipt":
+        raise TypeError("GenerationReceipt is issued only by the generation module")
+
+    def __reduce__(self) -> object:
+        raise TypeError("GenerationReceipt cannot be serialized")
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationOutcome:
+    record_path: Path
+    receipt: GenerationReceipt
+    cpu_only_test_harness: bool
+
+
+_ACTIVE_RECEIPTS: dict[object, Path] = {}
+
+
+def _issue_generation_receipt(record_path: Path, snapshot: Mapping[str, Any]) -> GenerationReceipt:
+    seal = object()
+    receipt = object.__new__(GenerationReceipt)
+    object.__setattr__(receipt, "_seal", seal)
+    object.__setattr__(receipt, "_snapshot", canonical_json_bytes(snapshot))
+    _ACTIVE_RECEIPTS[seal] = record_path.resolve()
+    return receipt
+
+
+def _consume_generation_receipt(receipt: object, record_path: Path) -> dict[str, Any]:
+    """Consume a receipt exactly once before any execution-package read."""
+
+    if type(receipt) is not GenerationReceipt:
+        raise RC1GPUGenerationError("generation receipt has the wrong exact type")
+    bound_path = _ACTIVE_RECEIPTS.pop(receipt._seal, None)
+    if bound_path is None or bound_path != record_path.resolve():
+        raise RC1GPUGenerationError("generation receipt is absent, replayed, or path-mismatched")
+    try:
+        snapshot = json.loads(receipt._snapshot)
+    except Exception as exc:  # pragma: no cover - object is created only by the private factory
+        raise RC1GPUGenerationError("generation receipt snapshot is malformed") from exc
+    if not isinstance(snapshot, dict) or snapshot.get("completed") is not True:
+        raise RC1GPUGenerationError("generation receipt is incomplete")
+    return snapshot
 
 
 LOCKED_GPU_PACKAGES = {
@@ -65,11 +117,28 @@ def _write(path: Path, payload: bytes) -> None:
 
 
 def tensor_sha256(tensor: Any) -> str:
-    """Hash the actual float32 CPU values and shape of a latent tensor."""
+    """Hash exact tensor bytes with bounded host memory."""
 
-    contiguous = tensor.detach().to(device="cpu", dtype=getattr(__import__("torch"), "float32")).contiguous()
-    envelope = canonical_json_bytes({"shape": list(contiguous.shape), "dtype": "float32"}) + contiguous.numpy().tobytes()
-    return sha256_bytes(envelope)
+    import hashlib
+
+    torch = __import__("torch")
+    contiguous = tensor.detach().contiguous()
+    digest = hashlib.sha256()
+    digest.update(canonical_json_bytes({"shape": list(contiguous.shape), "dtype": str(contiguous.dtype)}))
+    byte_view = contiguous.view(torch.uint8).reshape(-1)
+    chunk_bytes = 8 * 1024 * 1024
+    for start in range(0, int(byte_view.numel()), chunk_bytes):
+        chunk = byte_view[start : start + chunk_bytes].to(device="cpu").contiguous().numpy().tobytes()
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _tensor_identity(tensor: Any) -> dict[str, Any]:
+    return {
+        "sha256": tensor_sha256(tensor),
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype),
+    }
 
 
 def _environment(torch: Any, diffusers: Any) -> dict[str, Any]:
@@ -152,6 +221,8 @@ def _carrier_hook(pipe: Any, torch: Any, schedule: Sequence[Sequence[float]], ca
             "schedule_sha256": sha256_bytes(canonical_json_bytes(schedule)),
             "output_shape": list(output.shape),
             "output_dtype": str(output.dtype),
+            "input_tensor_sha256": tensor_sha256(output),
+            "modified_tensor_sha256": tensor_sha256(modified),
             "distinct_storage": int(modified.data_ptr()) != int(output.data_ptr()),
             "effective_relative_rms": float(energy["effective_relative_rms"]),
             "evidence_mode": EVIDENCE_PRODUCTION,
@@ -167,7 +238,11 @@ def _generate_condition(pipe: Any, torch: Any, preflight: Preflight, parameters:
     carrier_records: list[dict[str, Any]] = []
     schedule = None if condition == "OFF" else (schedule_a() if condition == "A" else schedule_b())
     handle = None if schedule is None else _carrier_hook(pipe, torch, schedule, preflight.config["carrier"], carrier_records)
-    latent_before = tensor_sha256(initial_latents)
+    initial_identity = _tensor_identity(initial_latents)
+    condition_latents = initial_latents.clone()
+    condition_identity = _tensor_identity(condition_latents)
+    if condition_identity != initial_identity:
+        raise RC1GPUGenerationError("condition latent clone differs from the shared initial tensor")
     try:
         result = pipe(
             prompt=parameters["prompt"],
@@ -177,12 +252,12 @@ def _generate_condition(pipe: Any, torch: Any, preflight: Preflight, parameters:
             width=int(parameters["width"]),
             guidance_scale=float(parameters["guidance_scale"]),
             num_inference_steps=int(parameters["inference_steps"]),
-            latents=initial_latents.clone(),
+            latents=condition_latents,
         )
     finally:
         if handle is not None:
             handle.remove()
-    if tensor_sha256(initial_latents) != latent_before:
+    if _tensor_identity(initial_latents) != initial_identity:
         raise RC1GPUGenerationError("shared initial latent was mutated")
     if condition == "OFF" and carrier_records:
         raise RC1GPUGenerationError("OFF condition recorded carrier injection")
@@ -192,51 +267,105 @@ def _generate_condition(pipe: Any, torch: Any, preflight: Preflight, parameters:
     encode_saved_mp4(frames, mp4_path)
     codec_identity = _inspect_saved_mp4(mp4_path)
     features = extract_feature_matrix(decode_saved_mp4(mp4_path))
-    return {"carrier_records": carrier_records, "features": features, "latent_sha256": latent_before, "codec_identity": codec_identity}
+    return {
+        "carrier_records": carrier_records,
+        "features": features,
+        "initial_latent_identity": initial_identity,
+        "condition_latent_identity": condition_identity,
+        "codec_identity": codec_identity,
+        "video_saved_complete": mp4_path.is_file(),
+        "video_sha256": sha256_file(mp4_path),
+    }
 
 
-def run_gpu_generation(preflight: Preflight, output_dir: Path, command: Sequence[str]) -> Path:
-    """Generate exactly two OFF/A/B groups and return the execution record path."""
+def run_gpu_generation(
+    preflight: Preflight,
+    output_dir: Path,
+    command: Sequence[str],
+    *,
+    _test_backend: Any | None = None,
+) -> GenerationOutcome:
+    """Generate two OFF/A/B groups and issue an opaque same-process receipt.
+
+    ``_test_backend`` is dependency injection for the CPU-only control-flow
+    harness.  The CLI never exposes it and receipts issued through it retain an
+    explicit test-only boundary.
+    """
 
     if output_dir.exists() and any(output_dir.iterdir()):
         raise RC1GPUGenerationError("generation output directory must be empty")
     output_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        import diffusers
-        import torch
-        from diffusers import WanPipeline
-    except Exception as exc:
-        raise RC1GPUGenerationError("locked GPU dependencies are unavailable") from exc
-    runtime = _environment(torch, diffusers)
-    pipe = WanPipeline.from_pretrained(
-        preflight.config["model"]["id"],
-        revision=preflight.config["model"]["revision"],
-        torch_dtype=torch.bfloat16,
-    ).to("cuda")
-    scheduler_config = dict(pipe.scheduler.config)
-    scheduler_identity = {
-        "class": type(pipe.scheduler).__name__,
-        "config_sha256": sha256_bytes(canonical_json_bytes(scheduler_config)),
-        "bound_to_model_revision": preflight.config["model"]["revision"],
-    }
-    environment = {
-        "schema_version": 1,
-        "artifact_schema": "sc_sstw_rc1_execution_environment_v1",
-        "evidence_mode": EVIDENCE_PRODUCTION,
-        "model_id": preflight.config["model"]["id"],
-        "model_revision": preflight.config["model"]["revision"],
-        "runtime": runtime,
-        "scheduler": scheduler_identity,
-        "sampler": scheduler_identity.copy(),
-    }
+    cpu_only_test_harness = _test_backend is not None
+    if _test_backend is None:
+        try:
+            import diffusers
+            import torch
+            from diffusers import WanPipeline
+        except Exception as exc:
+            raise RC1GPUGenerationError("locked GPU dependencies are unavailable") from exc
+        runtime = _environment(torch, diffusers)
+        pipe = WanPipeline.from_pretrained(
+            preflight.config["model"]["id"],
+            revision=preflight.config["model"]["revision"],
+            torch_dtype=torch.bfloat16,
+        ).to("cuda")
+        observed_revision = getattr(pipe.config, "_commit_hash", None) or getattr(pipe.transformer.config, "_commit_hash", None)
+        if observed_revision != preflight.config["model"]["revision"]:
+            raise RC1GPUGenerationError("loaded model revision could not be observed or differs from the frozen revision")
+        scheduler_config = dict(pipe.scheduler.config)
+        scheduler_identity = {
+            "class": type(pipe.scheduler).__name__,
+            "config_sha256": sha256_bytes(canonical_json_bytes(scheduler_config)),
+            "bound_to_model_revision": preflight.config["model"]["revision"],
+        }
+        environment = {
+            "schema_version": 1,
+            "artifact_schema": "sc_sstw_rc1_execution_environment_v1",
+            "evidence_mode": EVIDENCE_PRODUCTION,
+            "model_id": preflight.config["model"]["id"],
+            "model_revision": preflight.config["model"]["revision"],
+            "runtime": runtime,
+            "scheduler": scheduler_identity,
+            "sampler": scheduler_identity.copy(),
+        }
+        loaded_identity = {
+            "model_id": preflight.config["model"]["id"],
+            "loaded_revision": observed_revision,
+            "scheduler": scheduler_identity,
+            "dtype": str(next(pipe.transformer.parameters()).dtype),
+            "device": str(pipe._execution_device),
+        }
+    else:
+        pipe = None
+        torch = None
+        environment = _test_backend.load_environment(preflight)
+        if not isinstance(environment, Mapping):
+            raise RC1GPUGenerationError("CPU test backend returned an invalid environment")
+        environment = dict(environment)
+        loaded_identity = dict(_test_backend.loaded_identity(preflight, environment))
+    if environment.get("model_id") != preflight.config["model"]["id"] or environment.get("model_revision") != preflight.config["model"]["revision"]:
+        raise RC1GPUGenerationError("loaded model identity differs from the frozen revision")
     group_records: list[dict[str, Any]] = []
+    receipt_groups: list[dict[str, Any]] = []
     for plan_group in preflight.plan["groups"]:
         parameters = expected_matched_parameters(preflight.config, plan_group)
-        initial_latents = _prepare_initial_latents(pipe, torch, parameters)
-        latent_sha = tensor_sha256(initial_latents)
+        initial_latents = (
+            _prepare_initial_latents(pipe, torch, parameters)
+            if _test_backend is None
+            else _test_backend.prepare_initial_latents(parameters)
+        )
+        initial_identity = (
+            _tensor_identity(initial_latents)
+            if _test_backend is None
+            else dict(_test_backend.latent_identity(initial_latents))
+        )
+        if set(initial_identity) != {"sha256", "shape", "dtype"} or not isinstance(initial_identity["sha256"], str):
+            raise RC1GPUGenerationError("initial latent identity is incomplete")
+        latent_sha = initial_identity["sha256"]
         parameter_sha = sha256_bytes(canonical_json_bytes(parameters))
         condition_records: list[dict[str, Any]] = []
         attempts: list[dict[str, Any]] = []
+        receipt_conditions: list[dict[str, Any]] = []
         for condition in CONDITIONS:
             condition_dir = output_dir / plan_group["group_id"] / condition
             condition_dir.mkdir(parents=True, exist_ok=False)
@@ -251,9 +380,15 @@ def run_gpu_generation(preflight: Preflight, output_dir: Path, command: Sequence
                 "integrity": condition_dir / "integrity.json",
             }
             try:
-                generated = _generate_condition(pipe, torch, preflight, parameters, initial_latents, condition, paths["video"])
-                if generated["latent_sha256"] != latent_sha:
+                generated = (
+                    _generate_condition(pipe, torch, preflight, parameters, initial_latents, condition, paths["video"])
+                    if _test_backend is None
+                    else _test_backend.generate_condition(preflight, parameters, initial_latents, condition, paths["video"])
+                )
+                if generated.get("initial_latent_identity") != initial_identity or generated.get("condition_latent_identity") != initial_identity:
                     raise RC1GPUGenerationError("condition did not consume the shared latent identity")
+                if generated.get("video_saved_complete") is not True or not paths["video"].is_file() or generated.get("video_sha256") != sha256_file(paths["video"]):
+                    raise RC1GPUGenerationError("saved MP4 completion or identity differs from generation observation")
                 _write(paths["features"], canonical_json_bytes({
                     "schema_version": 1,
                     "feature_cache_schema": FEATURE_CACHE_SCHEMA,
@@ -276,6 +411,17 @@ def run_gpu_generation(preflight: Preflight, output_dir: Path, command: Sequence
                 attempts.append({"condition": condition, "attempt_index": 0, "outcome": "failed", "matched_parameters_sha256": parameter_sha})
                 raise
             artifacts = {name: {"path": str(paths[name].relative_to(output_dir)), "sha256": sha256_file(paths[name])} for name in ARTIFACT_NAMES}
+            receipt_conditions.append({
+                "condition": condition,
+                "initial_latent_identity": initial_identity,
+                "condition_latent_identity": generated["condition_latent_identity"],
+                "carrier_hook_effect": condition != "OFF",
+                "carrier_records": generated["carrier_records"],
+                "video_saved_complete": generated["video_saved_complete"],
+                "video_sha256": generated["video_sha256"],
+                "codec_identity": generated["codec_identity"],
+                "artifacts": artifacts,
+            })
             condition_records.append({
                 "condition": condition,
                 "schedule_id": {"OFF": "NONE", "A": "A", "B": "B"}[condition],
@@ -294,6 +440,11 @@ def run_gpu_generation(preflight: Preflight, output_dir: Path, command: Sequence
             "conditions": condition_records,
             "attempts": attempts,
         })
+        receipt_groups.append({
+            "group_id": plan_group["group_id"],
+            "initial_latent_identity": initial_identity,
+            "conditions": receipt_conditions,
+        })
     record = {
         "schema_version": 1,
         "execution_schema": EXECUTION_SCHEMA,
@@ -306,4 +457,34 @@ def run_gpu_generation(preflight: Preflight, output_dir: Path, command: Sequence
     }
     record_path = output_dir / "execution.json"
     _write(record_path, json.dumps(record, indent=2, sort_keys=False, allow_nan=False).encode("utf-8") + b"\n")
-    return record_path
+    receipt_snapshot = {
+        "schema_version": 1,
+        "trust_boundary": "same_clean_source_runner_process_observed_generation_call",
+        "completed": True,
+        "cpu_only_test_harness": cpu_only_test_harness,
+        "record_path": str(record_path.resolve()),
+        "execution_record_sha256": sha256_file(record_path),
+        "preflight": {
+            "manifest_sha256": sha256_bytes(preflight.manifest_bytes),
+            "config_sha256": sha256_bytes(preflight.config_bytes),
+            "plan_sha256": sha256_bytes(preflight.plan_bytes),
+            "prerequisite_identity": preflight.prerequisite.identity(),
+            "source_head": preflight.source_state.head,
+            "source_tree": preflight.source_state.tree,
+            "source_hashes": preflight.source_hashes,
+            "command_schema": preflight.manifest["command_schema"],
+            "output_schema": preflight.manifest["output_schema"],
+        },
+        "implementation": {
+            "generation_module_path": GPU_LIBRARY_PATH,
+            "generation_module_sha256": preflight.source_hashes[GPU_LIBRARY_PATH],
+            "extractor_path": EXTRACTOR_LIBRARY_PATH,
+            "extractor_sha256": preflight.source_hashes[EXTRACTOR_LIBRARY_PATH],
+        },
+        "loaded_identity": loaded_identity,
+        "environment": environment,
+        "command_artifact": command_artifact_payload(preflight, EVIDENCE_PRODUCTION),
+        "groups": receipt_groups,
+    }
+    receipt = _issue_generation_receipt(record_path, receipt_snapshot)
+    return GenerationOutcome(record_path=record_path, receipt=receipt, cpu_only_test_harness=cpu_only_test_harness)

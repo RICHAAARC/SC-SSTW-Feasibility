@@ -758,8 +758,19 @@ def _validate_carrier_records(records: Any, condition: str, config: Mapping[str,
             raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "carrier RMS is malformed") from exc
         if not math.isfinite(rms) or abs(rms - float(config["carrier"]["target_relative_rms"])) > float(config["carrier"]["target_relative_rms_absolute_tolerance"]):
             raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "carrier RMS differs from the frozen target")
-        if evidence_mode == EVIDENCE_PRODUCTION and (record.get("distinct_storage") is not True or not isinstance(record.get("output_shape"), list) or not isinstance(record.get("output_dtype"), str)):
-            raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "production carrier record lacks actual tensor integrity")
+        if evidence_mode == EVIDENCE_PRODUCTION:
+            production_fields = {"output_shape", "output_dtype", "input_tensor_sha256", "modified_tensor_sha256", "distinct_storage"}
+            if (
+                not production_fields.issubset(record)
+                or record.get("distinct_storage") is not True
+                or not isinstance(record.get("output_shape"), list)
+                or not record["output_shape"]
+                or any(not isinstance(item, int) or item <= 0 for item in record["output_shape"])
+                or record.get("output_dtype") != config["generation"]["dtype"]
+            ):
+                raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "production carrier record lacks actual tensor integrity")
+            if not _is_sha256(record["input_tensor_sha256"]) or not _is_sha256(record["modified_tensor_sha256"]) or record["input_tensor_sha256"] == record["modified_tensor_sha256"]:
+                raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "production carrier tensor hashes are malformed or show no hook effect")
         if evidence_mode == EVIDENCE_SYNTHETIC and record.get("test_only_synthetic") is not True:
             raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "synthetic carrier record lacks test-only labeling")
 
@@ -784,12 +795,74 @@ def _artifact_path(execution_path: Path, artifact: Mapping[str, Any]) -> Path:
     return resolved
 
 
-def validate_execution_record(record_path: Path, preflight_result: Preflight, *, synthetic_fixture: bool) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Path]]]:
+def validate_execution_record(
+    record_path: Path,
+    preflight_result: Preflight,
+    *,
+    synthetic_fixture: bool,
+    generation_receipt: object | None = None,
+    allow_cpu_test_harness: bool = False,
+) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Path]]]:
+    receipt: dict[str, Any] | None = None
+    if synthetic_fixture:
+        if generation_receipt is not None:
+            raise InvalidExperiment("GENERATION_RECEIPT_MODE_MISMATCH", "synthetic execution cannot consume a production generation receipt")
+    else:
+        try:
+            from .rc1_gpu_generation import RC1GPUGenerationError, _consume_generation_receipt
+
+            receipt = _consume_generation_receipt(generation_receipt, record_path)
+        except (RC1GPUGenerationError, AttributeError, TypeError) as exc:
+            raise InvalidExperiment("GENERATION_RECEIPT_INVALID", "production execution requires a live same-process generation receipt") from exc
+        expected_preflight = {
+            "manifest_sha256": sha256_bytes(preflight_result.manifest_bytes),
+            "config_sha256": sha256_bytes(preflight_result.config_bytes),
+            "plan_sha256": sha256_bytes(preflight_result.plan_bytes),
+            "prerequisite_identity": preflight_result.prerequisite.identity(),
+            "source_head": preflight_result.source_state.head,
+            "source_tree": preflight_result.source_state.tree,
+            "source_hashes": preflight_result.source_hashes,
+            "command_schema": preflight_result.manifest["command_schema"],
+            "output_schema": preflight_result.manifest["output_schema"],
+        }
+        expected_implementation = {
+            "generation_module_path": GPU_LIBRARY_PATH,
+            "generation_module_sha256": preflight_result.source_hashes[GPU_LIBRARY_PATH],
+            "extractor_path": EXTRACTOR_LIBRARY_PATH,
+            "extractor_sha256": preflight_result.source_hashes[EXTRACTOR_LIBRARY_PATH],
+        }
+        if receipt.get("trust_boundary") != "same_clean_source_runner_process_observed_generation_call" or receipt.get("preflight") != expected_preflight or receipt.get("implementation") != expected_implementation:
+            raise InvalidExperiment("GENERATION_RECEIPT_IDENTITY_MISMATCH", "generation receipt differs from the frozen source or preflight")
+        loaded = receipt.get("loaded_identity")
+        receipt_environment = receipt.get("environment")
+        expected_dtype = str(preflight_result.config["generation"]["dtype"])
+        if (
+            not isinstance(loaded, Mapping)
+            or not isinstance(receipt_environment, Mapping)
+            or loaded.get("model_id") != preflight_result.config["model"]["id"]
+            or loaded.get("loaded_revision") != preflight_result.config["model"]["revision"]
+            or loaded.get("scheduler") != receipt_environment.get("scheduler")
+            or loaded.get("dtype") not in {expected_dtype, f"torch.{expected_dtype}"}
+            or not isinstance(loaded.get("device"), str)
+            or not loaded["device"]
+        ):
+            raise InvalidExperiment("GENERATION_RECEIPT_RUNTIME_MISMATCH", "loaded model/runtime identity differs from the frozen generation")
+        if receipt.get("record_path") != str(record_path.resolve()):
+            raise InvalidExperiment("GENERATION_RECEIPT_PATH_MISMATCH", "generation receipt is not bound to this execution package")
+        if receipt.get("cpu_only_test_harness") is True and not allow_cpu_test_harness:
+            raise InvalidExperiment("CPU_TEST_HARNESS_FORBIDDEN", "CPU-only generation harness cannot enter the production CLI")
+        if receipt.get("cpu_only_test_harness") not in {True, False}:
+            raise InvalidExperiment("GENERATION_RECEIPT_INVALID", "generation receipt evidence boundary is malformed")
+        if receipt.get("cpu_only_test_harness") is False and "cuda" not in loaded["device"].lower():
+            raise InvalidExperiment("GENERATION_RECEIPT_RUNTIME_MISMATCH", "production generation was not observed on the frozen CUDA path")
     if _forbidden_path(str(record_path)):
         raise InvalidExperiment("FORBIDDEN_FORMAL_PATH", "execution record path uses a forbidden formal ID")
     if record_path.is_symlink() or not record_path.is_file():
         raise InvalidExperiment("EXECUTION_RECORD_MISSING", "matched-triplet execution record is missing")
-    record = _json_object(record_path.read_bytes(), "EXECUTION_RECORD_INVALID_JSON")
+    record_bytes = record_path.read_bytes()
+    if receipt is not None and receipt.get("execution_record_sha256") != sha256_bytes(record_bytes):
+        raise InvalidExperiment("GENERATION_RECEIPT_DISK_MISMATCH", "execution record differs from the in-process generation receipt")
+    record = _json_object(record_bytes, "EXECUTION_RECORD_INVALID_JSON")
     _require_exact_keys(record, {"schema_version", "execution_schema", "protocol_id", "plan_sha256", "prerequisite_identity", "evidence_mode", "evidence_schema", "groups"}, "EXECUTION_SCHEMA_MISMATCH")
     if record["schema_version"] != 1 or record["execution_schema"] != EXECUTION_SCHEMA or record["protocol_id"] != PROTOCOL_ID:
         raise InvalidExperiment("EXECUTION_SCHEMA_MISMATCH", "execution version or protocol changed")
@@ -804,9 +877,12 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
     if not isinstance(groups, list) or [item.get("group_id") for item in groups if isinstance(item, Mapping)] != [item["group_id"] for item in plan_groups]:
         raise InvalidExperiment("TRIPLET_GROUP_SET_MISMATCH", "execution groups do not match the frozen plan")
 
+    receipt_groups = receipt.get("groups") if receipt is not None else None
+    if receipt is not None and (not isinstance(receipt_groups, list) or [item.get("group_id") for item in receipt_groups if isinstance(item, Mapping)] != [item["group_id"] for item in plan_groups]):
+        raise InvalidExperiment("GENERATION_RECEIPT_TRIPLET_MISMATCH", "receipt triplet set differs from the frozen plan")
     artifact_paths: dict[tuple[str, str], dict[str, Path]] = {}
     pending_hashes: list[tuple[str, Path, str]] = []
-    for group_record, plan_group in zip(groups, plan_groups, strict=True):
+    for group_index, (group_record, plan_group) in enumerate(zip(groups, plan_groups, strict=True)):
         if not isinstance(group_record, Mapping):
             raise InvalidExperiment("TRIPLET_SCHEMA_MISMATCH", "triplet group must be an object")
         _require_exact_keys(group_record, {"group_id", "content_grammar", "prompt", "prompt_sha256", "seed", "matched_parameters", "conditions", "attempts"}, "TRIPLET_SCHEMA_MISMATCH")
@@ -822,9 +898,12 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
         if not isinstance(conditions, list) or [item.get("condition") for item in conditions if isinstance(item, Mapping)] != list(CONDITIONS):
             raise InvalidExperiment("TRIPLET_CONDITION_SET_MISMATCH", "triplet must contain exactly ordered OFF/A/B")
         latent_hashes: set[str] = set()
+        receipt_group = receipt_groups[group_index] if receipt_groups is not None else None
+        if receipt_group is not None and receipt_group.get("initial_latent_identity", {}).get("sha256") is None:
+            raise InvalidExperiment("GENERATION_RECEIPT_LATENT_MISMATCH", "receipt lacks the actual initial latent tensor identity")
         group_environment: dict[str, Any] | None = None
         group_command: dict[str, Any] | None = None
-        for condition_record in conditions:
+        for condition_index, condition_record in enumerate(conditions):
             _require_exact_keys(condition_record, {"condition", "schedule_id", "carrier_enabled", "initial_latent_sha256", "matched_parameters_sha256", "artifacts"}, "TRIPLET_SCHEMA_MISMATCH")
             condition = condition_record["condition"]
             expected_schedule = {"OFF": "NONE", "A": "A", "B": "B"}[condition]
@@ -833,6 +912,15 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
             if not _is_sha256(condition_record["initial_latent_sha256"]):
                 raise InvalidExperiment("TRIPLET_LATENT_IDENTITY_INVALID", "initial latent digest is malformed")
             latent_hashes.add(condition_record["initial_latent_sha256"])
+            receipt_condition = receipt_group["conditions"][condition_index] if receipt_group is not None and isinstance(receipt_group.get("conditions"), list) and len(receipt_group["conditions"]) == len(CONDITIONS) else None
+            if receipt_group is not None:
+                if not isinstance(receipt_condition, Mapping) or receipt_condition.get("condition") != condition:
+                    raise InvalidExperiment("GENERATION_RECEIPT_TRIPLET_MISMATCH", "receipt condition set or order changed")
+                initial_identity = receipt_group["initial_latent_identity"]
+                if receipt_condition.get("initial_latent_identity") != initial_identity or receipt_condition.get("condition_latent_identity") != initial_identity or condition_record["initial_latent_sha256"] != initial_identity.get("sha256"):
+                    raise InvalidExperiment("GENERATION_RECEIPT_LATENT_MISMATCH", "receipt and disk latent identities differ")
+                if receipt_condition.get("carrier_hook_effect") is not (condition != "OFF"):
+                    raise InvalidExperiment("GENERATION_RECEIPT_HOOK_MISMATCH", "receipt carrier hook effect differs from the condition")
             if condition_record["matched_parameters_sha256"] != parameter_sha:
                 raise InvalidExperiment("TRIPLET_PARAMETER_MISMATCH", "condition parameters differ from the group")
             artifacts = condition_record["artifacts"]
@@ -844,6 +932,8 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
                 if not isinstance(identity, Mapping):
                     raise InvalidExperiment("TRIPLET_ARTIFACT_IDENTITY_INVALID", "artifact identity must be an object")
                 _require_exact_keys(identity, {"path", "sha256"}, "TRIPLET_ARTIFACT_IDENTITY_INVALID")
+                if receipt_condition is not None and receipt_condition.get("artifacts", {}).get(artifact_name) != identity:
+                    raise InvalidExperiment("GENERATION_RECEIPT_DISK_MISMATCH", "receipt and disk artifact identities differ")
                 if not _is_sha256(identity["sha256"]):
                     raise InvalidExperiment("TRIPLET_ARTIFACT_IDENTITY_INVALID", "artifact digest is malformed")
                 path = _artifact_path(record_path, identity)
@@ -870,11 +960,12 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
             raise InvalidExperiment("TRIPLET_ARTIFACT_MISSING", f"execution artifact missing: {label}")
         if sha256_file(path) != expected_sha:
             raise InvalidExperiment("TRIPLET_ARTIFACT_HASH_MISMATCH", f"execution artifact digest changed: {label}")
-    for group_record, plan_group in zip(groups, plan_groups, strict=True):
+    for group_index, (group_record, plan_group) in enumerate(zip(groups, plan_groups, strict=True)):
         group_environment = None
         group_command = None
-        for condition_record in group_record["conditions"]:
+        for condition_index, condition_record in enumerate(group_record["conditions"]):
             condition = condition_record["condition"]
+            receipt_condition = receipt_groups[group_index]["conditions"][condition_index] if receipt_groups is not None else None
             paths = artifact_paths[(group_record["group_id"], condition)]
             config_payload = _load_artifact_json(paths["config"], "EXECUTION_CONFIG_INVALID")
             expected_config = condition_config_payload(
@@ -889,6 +980,8 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
                 raise InvalidExperiment("EXECUTION_CONFIG_INVALID", "condition config differs from frozen parameters")
             environment_payload = _load_artifact_json(paths["environment"], "EXECUTION_ENVIRONMENT_INVALID")
             _validate_environment_payload(environment_payload, preflight_result.config, expected_mode)
+            if receipt is not None and environment_payload != receipt.get("environment"):
+                raise InvalidExperiment("GENERATION_RECEIPT_RUNTIME_MISMATCH", "disk runtime/model/scheduler differs from generation observation")
             if group_environment is None:
                 group_environment = environment_payload
             elif environment_payload != group_environment:
@@ -896,6 +989,8 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
             command_payload = _load_artifact_json(paths["command"], "EXECUTION_COMMAND_INVALID")
             if command_payload != command_artifact_payload(preflight_result, expected_mode):
                 raise InvalidExperiment("EXECUTION_COMMAND_INVALID", "execution command identity changed")
+            if receipt is not None and command_payload != receipt.get("command_artifact"):
+                raise InvalidExperiment("GENERATION_RECEIPT_COMMAND_MISMATCH", "disk command differs from generation observation")
             if group_command is None:
                 group_command = command_payload
             elif command_payload != group_command:
@@ -913,6 +1008,13 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
             if integrity_payload != expected_integrity:
                 raise InvalidExperiment("EXECUTION_INTEGRITY_INVALID", "integrity metadata differs from frozen execution identity")
             _validate_carrier_records(integrity_payload["carrier_records"], condition, preflight_result.config, expected_mode)
+            if receipt_condition is not None:
+                if integrity_payload["carrier_records"] != receipt_condition.get("carrier_records"):
+                    raise InvalidExperiment("GENERATION_RECEIPT_HOOK_MISMATCH", "disk carrier records differ from generation observation")
+                if integrity_payload["codec_identity"] != receipt_condition.get("codec_identity"):
+                    raise InvalidExperiment("GENERATION_RECEIPT_VIDEO_MISMATCH", "disk codec identity differs from generation observation")
+                if receipt_condition.get("video_saved_complete") is not True or condition_record["artifacts"]["video"]["sha256"] != receipt_condition.get("video_sha256"):
+                    raise InvalidExperiment("GENERATION_RECEIPT_VIDEO_MISMATCH", "saved video completion or digest differs from generation observation")
             if expected_mode == EVIDENCE_SYNTHETIC:
                 synthetic_video = _load_artifact_json(paths["video"], "SYNTHETIC_VIDEO_IDENTITY_INVALID")
                 expected_synthetic_video = {"schema_version": 1, "evidence_mode": EVIDENCE_SYNTHETIC, "artifact_kind": "synthetic_video_identity", "group_id": group_record["group_id"], "condition": condition}
@@ -1098,7 +1200,15 @@ def invalid_audit(error: InvalidExperiment, context: Mapping[str, Any] | None = 
     return audit
 
 
-def valid_audit(preflight_result: Preflight, execution_record: Mapping[str, Any], execution_record_sha256: str, groups: list[dict[str, Any]], passed: bool) -> dict[str, Any]:
+def valid_audit(
+    preflight_result: Preflight,
+    execution_record: Mapping[str, Any],
+    execution_record_sha256: str,
+    groups: list[dict[str, Any]],
+    passed: bool,
+    *,
+    cpu_only_test_harness: bool = False,
+) -> dict[str, Any]:
     execution_identity = [
         {
             "group_id": group["group_id"],
@@ -1125,7 +1235,11 @@ def valid_audit(preflight_result: Preflight, execution_record: Mapping[str, Any]
             "status": STATUS_PASS if passed else STATUS_FAIL,
             "valid_experiment": True,
             "reason_code": "ALL_MATCHED_TRIPLETS_PASSED" if passed else "AT_LEAST_ONE_CASE_FAILED",
-            "conclusion": PASS_CONCLUSION if passed else "frozen RC1 screen did not pass every required case",
+            "conclusion": (
+                "CPU-only control-flow harness exercised the passing branch; this is not an RC1 result"
+                if passed and cpu_only_test_harness
+                else PASS_CONCLUSION if passed else "frozen RC1 screen did not pass every required case"
+            ),
             "source_state": preflight_result.source_state.as_dict(),
             "source_file_sha256": preflight_result.source_hashes,
             "manifest_sha256": sha256_bytes(preflight_result.manifest_bytes),
@@ -1138,6 +1252,13 @@ def valid_audit(preflight_result: Preflight, execution_record: Mapping[str, Any]
             "triplet_execution_identity": execution_identity,
             "evidence_mode": execution_record["evidence_mode"],
             "test_only_synthetic": execution_record["evidence_mode"] == EVIDENCE_SYNTHETIC,
+            "cpu_only_test_harness": cpu_only_test_harness,
+            "generation_trust_boundary": (
+                "external_test_only_synthetic_fixture"
+                if execution_record["evidence_mode"] == EVIDENCE_SYNTHETIC
+                else "cpu_only_control_flow_harness" if cpu_only_test_harness
+                else "same_clean_source_runner_process_observed_generation_call"
+            ),
             "schedule_preflight": schedule_preflight(),
             "evaluation_budget": {"templates": list(TEMPLATES), "start_indices": list(START_INDICES), "equal_for_all_conditions": True},
             "groups": groups,
