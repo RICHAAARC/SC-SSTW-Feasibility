@@ -20,12 +20,21 @@ from .learned_observation import decode_saved_mp4, encode_saved_mp4, extract_fea
 from .rc1_method_validation import (
     ARTIFACT_NAMES,
     CONDITIONS,
+    EVIDENCE_PRODUCTION,
     EXECUTION_SCHEMA,
+    FEATURE_CACHE_ATOL,
+    FEATURE_CACHE_SCHEMA,
+    FEATURE_EXTRACTOR_ID,
+    EXTRACTOR_LIBRARY_PATH,
     PLAN_RAW_SHA256,
+    PRODUCTION_EVIDENCE_SCHEMA,
     PROTOCOL_ID,
     Preflight,
     canonical_json_bytes,
+    command_artifact_payload,
+    condition_config_payload,
     expected_matched_parameters,
+    integrity_artifact_payload,
     schedule_a,
     schedule_b,
     sha256_bytes,
@@ -101,7 +110,7 @@ def _inspect_saved_mp4(path: Path) -> dict[str, Any]:
     expected = {"codec_name": "h264", "pix_fmt": "yuv420p", "width": 512, "height": 320, "avg_frame_rate": "8/1", "nb_frames": "49"}
     if {key: observed.get(key) for key in expected} != expected:
         raise RC1GPUGenerationError("saved-MP4 codec, geometry, frame-count, or FPS mismatch")
-    return expected
+    return {"container": "mp4", "codec_name": "h264", "pixel_format": "yuv420p", "width": 512, "height": 320, "fps": "8/1", "frame_count": 49, "decodable": True}
 
 
 def _prepare_initial_latents(pipe: Any, torch: Any, parameters: Mapping[str, Any]) -> Any:
@@ -145,6 +154,7 @@ def _carrier_hook(pipe: Any, torch: Any, schedule: Sequence[Sequence[float]], ca
             "output_dtype": str(output.dtype),
             "distinct_storage": int(modified.data_ptr()) != int(output.data_ptr()),
             "effective_relative_rms": float(energy["effective_relative_rms"]),
+            "evidence_mode": EVIDENCE_PRODUCTION,
         })
         if abs(float(energy["effective_relative_rms"]) - float(carrier["target_relative_rms"])) > float(carrier["target_relative_rms_absolute_tolerance"]):
             raise RC1GPUGenerationError("carrier RMS differs from the frozen target")
@@ -197,19 +207,28 @@ def run_gpu_generation(preflight: Preflight, output_dir: Path, command: Sequence
         from diffusers import WanPipeline
     except Exception as exc:
         raise RC1GPUGenerationError("locked GPU dependencies are unavailable") from exc
-    environment = _environment(torch, diffusers)
+    runtime = _environment(torch, diffusers)
     pipe = WanPipeline.from_pretrained(
         preflight.config["model"]["id"],
         revision=preflight.config["model"]["revision"],
         torch_dtype=torch.bfloat16,
     ).to("cuda")
     scheduler_config = dict(pipe.scheduler.config)
-    environment["scheduler"] = {
+    scheduler_identity = {
         "class": type(pipe.scheduler).__name__,
         "config_sha256": sha256_bytes(canonical_json_bytes(scheduler_config)),
         "bound_to_model_revision": preflight.config["model"]["revision"],
     }
-    environment["sampler"] = environment["scheduler"].copy()
+    environment = {
+        "schema_version": 1,
+        "artifact_schema": "sc_sstw_rc1_execution_environment_v1",
+        "evidence_mode": EVIDENCE_PRODUCTION,
+        "model_id": preflight.config["model"]["id"],
+        "model_revision": preflight.config["model"]["revision"],
+        "runtime": runtime,
+        "scheduler": scheduler_identity,
+        "sampler": scheduler_identity.copy(),
+    }
     group_records: list[dict[str, Any]] = []
     for plan_group in preflight.plan["groups"]:
         parameters = expected_matched_parameters(preflight.config, plan_group)
@@ -235,13 +254,23 @@ def run_gpu_generation(preflight: Preflight, output_dir: Path, command: Sequence
                 generated = _generate_condition(pipe, torch, preflight, parameters, initial_latents, condition, paths["video"])
                 if generated["latent_sha256"] != latent_sha:
                     raise RC1GPUGenerationError("condition did not consume the shared latent identity")
-                _write(paths["features"], canonical_json_bytes({"source": "single_saved_mp4_only", "video_sha256": sha256_file(paths["video"]), "features": generated["features"]}) + b"\n")
+                _write(paths["features"], canonical_json_bytes({
+                    "schema_version": 1,
+                    "feature_cache_schema": FEATURE_CACHE_SCHEMA,
+                    "evidence_mode": EVIDENCE_PRODUCTION,
+                    "source": "recomputed_from_single_saved_mp4",
+                    "video_sha256": sha256_file(paths["video"]),
+                    "extractor_identity": {"id": FEATURE_EXTRACTOR_ID, "source_path": EXTRACTOR_LIBRARY_PATH, "source_sha256": preflight.source_hashes[EXTRACTOR_LIBRARY_PATH]},
+                    "comparison": {"atol": FEATURE_CACHE_ATOL, "rtol": 0.0},
+                    "features": generated["features"],
+                }) + b"\n")
                 _write(paths["stdout"], b"generation completed\n")
                 _write(paths["stderr"], b"")
-                _write(paths["config"], preflight.config_bytes)
+                saved_video_path = str(paths["video"].relative_to(output_dir))
+                _write(paths["config"], canonical_json_bytes(condition_config_payload(preflight, plan_group, condition, latent_sha, saved_video_path, EVIDENCE_PRODUCTION)) + b"\n")
                 _write(paths["environment"], canonical_json_bytes(environment) + b"\n")
-                _write(paths["command"], canonical_json_bytes(list(command)) + b"\n")
-                _write(paths["integrity"], canonical_json_bytes({"initial_latent_sha256": latent_sha, "condition": condition, "carrier_records": generated["carrier_records"], "codec_identity": generated["codec_identity"]}) + b"\n")
+                _write(paths["command"], canonical_json_bytes(command_artifact_payload(preflight, EVIDENCE_PRODUCTION)) + b"\n")
+                _write(paths["integrity"], canonical_json_bytes(integrity_artifact_payload(preflight, plan_group, condition, latent_sha, EVIDENCE_PRODUCTION, generated["carrier_records"], generated["codec_identity"])) + b"\n")
                 attempts.append({"condition": condition, "attempt_index": 0, "outcome": "success", "matched_parameters_sha256": parameter_sha})
             except Exception:
                 attempts.append({"condition": condition, "attempt_index": 0, "outcome": "failed", "matched_parameters_sha256": parameter_sha})
@@ -271,7 +300,8 @@ def run_gpu_generation(preflight: Preflight, output_dir: Path, command: Sequence
         "protocol_id": PROTOCOL_ID,
         "plan_sha256": PLAN_RAW_SHA256,
         "prerequisite_identity": preflight.prerequisite.identity(),
-        "synthetic_fixture": False,
+        "evidence_mode": EVIDENCE_PRODUCTION,
+        "evidence_schema": PRODUCTION_EVIDENCE_SCHEMA,
         "groups": group_records,
     }
     record_path = output_dir / "execution.json"

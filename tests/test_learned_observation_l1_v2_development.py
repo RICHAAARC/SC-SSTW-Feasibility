@@ -251,18 +251,24 @@ class TestRealRunner(unittest.TestCase):
         self.assertEqual(set(audit["source_file_sha256"]), set(gate.REQUIRED_SOURCE_PATHS))
         self.assertTrue((output / "authorization_manifest.json").is_file())
         self.assertTrue((output / "config.json").is_file())
+        self.assertTrue((output / "frozen_frontend.json").is_file())
+        self.assertTrue((output / "readout.json").is_file())
         self.assertTrue((output / "checksums.sha256").is_file())
+        declared = {line.split("  ", 1)[1] for line in (output / "checksums.sha256").read_text(encoding="utf-8").splitlines()}
+        self.assertEqual(declared, {"audit.json", "authorization_manifest.json", "command.txt", "config.json", "frozen_frontend.json", "readout.json"})
 
     def test_scientific_failure_uses_a1_then_a2_and_no_third_candidate(self) -> None:
         zeros = {dataset_id: np.zeros((13, 30)) for dataset_id in gate.PERMITTED_INPUT_IDS}
         harness = self.make_harness(zeros)
-        completed, audit, _ = harness.run()
+        completed, audit, output = harness.run()
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(audit["status"], gate.FAILURE_STATUS)
         self.assertTrue(audit["valid_experiment"])
         self.assertEqual(audit["candidate_attempts"], ["A1", "A2"])
         self.assertIsNone(audit["selected_candidate"])
         self.assertTrue(all(not item["development_evaluated"] for item in audit["candidates"]))
+        self.assertFalse((output / "frozen_frontend.json").exists())
+        self.assertFalse((output / "readout.json").exists())
 
     def test_fake_cli_commit_is_rejected(self) -> None:
         harness = self.make_harness()
@@ -320,8 +326,10 @@ class TestRealRunner(unittest.TestCase):
     def test_input_replacement_is_rejected(self) -> None:
         harness = self.make_harness()
         harness.feature_paths[41006].write_text('{"features": []}', encoding="utf-8")
-        _, audit, _ = harness.run()
+        _, audit, output = harness.run()
         self.assert_invalid(audit, "INPUT_HASH_MISMATCH")
+        self.assertFalse((output / "frozen_frontend.json").exists())
+        self.assertFalse((output / "readout.json").exists())
 
     def test_forbidden_heldout_is_rejected_without_path_access(self) -> None:
         harness = self.make_harness()

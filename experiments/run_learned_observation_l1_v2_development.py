@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from sc_sstw_feasibility.learned_observation_l1_v2 import (  # noqa: E402
     InvalidExperiment,
+    build_selected_prerequisite,
     canonical_json_bytes,
     evaluate_gate,
     invalid_audit,
@@ -33,14 +34,21 @@ def _write_package(
     *,
     manifest_bytes: bytes | None = None,
     config_bytes: bytes | None = None,
+    prerequisite_artifacts: Any | None = None,
 ) -> None:
     output.mkdir(parents=True, exist_ok=False)
-    (output / "audit.json").write_bytes(canonical_json_bytes(audit) + b"\n")
+    audit_bytes = canonical_json_bytes(audit) + b"\n"
+    if prerequisite_artifacts is not None and prerequisite_artifacts.audit_bytes != audit_bytes:
+        raise InvalidExperiment("PREREQUISITE_EXPORT_INTEGRITY_FAILURE", "exported prerequisite does not bind the written G0 audit")
+    (output / "audit.json").write_bytes(audit_bytes)
     (output / "command.txt").write_text(shlex.join(command) + "\n", encoding="utf-8")
     if manifest_bytes is not None:
         (output / "authorization_manifest.json").write_bytes(manifest_bytes)
     if config_bytes is not None:
         (output / "config.json").write_bytes(config_bytes)
+    if prerequisite_artifacts is not None:
+        (output / "frozen_frontend.json").write_bytes(prerequisite_artifacts.frontend_bytes)
+        (output / "readout.json").write_bytes(prerequisite_artifacts.readout_bytes)
     lines = []
     for path in sorted(output.iterdir()):
         lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
@@ -82,12 +90,14 @@ def run(
         checked = preflight(repo_root, manifest, declared_source_commit=source_commit)
         candidates, selected = evaluate_gate(checked.features)
         audit = valid_audit(checked, candidates, selected)
+        prerequisite_artifacts = build_selected_prerequisite(checked, audit, selected) if selected is not None else None
         _write_package(
             output,
             audit,
             invocation,
             manifest_bytes=checked.manifest_bytes,
             config_bytes=checked.config_bytes,
+            prerequisite_artifacts=prerequisite_artifacts,
         )
     except InvalidExperiment as error:
         audit = invalid_audit(error, _invalid_context(repo_root, manifest))

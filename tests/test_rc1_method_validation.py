@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
@@ -7,9 +8,12 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+from src.sc_sstw_feasibility.learned_observation import decode_saved_mp4, extract_feature_matrix
 
 from src.sc_sstw_feasibility.learned_observation_l1_v2 import (
     ABSOLUTE_THRESHOLDS,
@@ -26,7 +30,10 @@ from src.sc_sstw_feasibility.rc1_method_validation import (
     CONFIG_PATH,
     CONFIG_RAW_SHA256,
     CONDITIONS,
+    EVIDENCE_PRODUCTION,
+    EVIDENCE_SYNTHETIC,
     EXECUTION_SCHEMA,
+    FEATURE_CACHE_SCHEMA,
     FORBIDDEN_CLAIM_TOKENS,
     MANIFEST_SCHEMA,
     NOTEBOOK_PATH,
@@ -34,6 +41,7 @@ from src.sc_sstw_feasibility.rc1_method_validation import (
     PASS_CONCLUSION,
     PLAN_PATH,
     PLAN_RAW_SHA256,
+    PRODUCTION_EVIDENCE_SCHEMA,
     PROTOCOL_ID,
     REQUIRED_SOURCE_PATHS,
     RUNNER_PATH,
@@ -42,26 +50,33 @@ from src.sc_sstw_feasibility.rc1_method_validation import (
     STATUS_INVALID,
     STATUS_PASS,
     STATUS_PREREQUISITE,
+    SYNTHETIC_EVIDENCE_SCHEMA,
     TEMPLATES,
     FrozenPrerequisite,
     InvalidExperiment,
     PrerequisiteNotMet,
+    _inspect_and_decode_saved_mp4,
     canonical_json_bytes,
+    command_artifact_payload,
+    condition_config_payload,
     evaluate_execution,
     expected_matched_parameters,
     frontend_definition,
+    integrity_artifact_payload,
     preflight,
     schedule_a,
     schedule_b,
     schedule_preflight,
     sha256_bytes,
     sha256_file,
+    synthetic_environment_payload,
     validate_execution_record,
     validate_frozen_config_bytes,
     validate_frozen_plan_bytes,
     validate_manifest_schema,
     validate_prerequisite_package,
 )
+from src.sc_sstw_feasibility.rc1_prerequisite import G0_SUCCESS_PACKAGE_FILES, build_prerequisite_artifacts
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +109,8 @@ def _synthetic_readout() -> np.ndarray:
 
 def _make_prerequisite(path: Path, *, status: str = G0_SUCCESS_STATUS, candidate: str = "A1") -> str:
     thresholds = dict(ABSOLUTE_THRESHOLDS)
+    authorization_bytes = canonical_json_bytes({"synthetic": "authorization_identity"}) + b"\n"
+    config_bytes = canonical_json_bytes({"synthetic": "g0_config_identity"}) + b"\n"
     audit = {
         "protocol_id": G0_PROTOCOL_ID,
         "output_schema": G0_OUTPUT_SCHEMA,
@@ -104,34 +121,31 @@ def _make_prerequisite(path: Path, *, status: str = G0_SUCCESS_STATUS, candidate
         "selected_candidate": candidate,
         "source_state": {"head": HEX40, "tree": "c" * 40, "dirty": False},
         "source_file_sha256": {name: HEX64 for name in G0_REQUIRED_SOURCE_PATHS},
-        "config_identity": {"path": G0_CONFIG_PATH, "sha256": "d" * 64},
+        "config_identity": {"path": G0_CONFIG_PATH, "sha256": sha256_bytes(config_bytes)},
+        "manifest_identity": {"sha256": sha256_bytes(authorization_bytes)},
         "input_sha256": {str(item): "e" * 64 for item in PERMITTED_INPUT_IDS},
         "candidates": [{"candidate": candidate, "development_gate_pass": True, "derived_envelope": thresholds}],
     }
-    readout = {"schema_version": 1, "selected_candidate": candidate, "shape": [31, 2], "coefficients": _synthetic_readout().tolist()}
-    _write_json(path / "audit.json", audit)
-    _write_json(path / "readout.json", readout)
-    audit_sha = sha256_file(path / "audit.json")
-    readout_sha = sha256_file(path / "readout.json")
-    frontend = {
-        "schema_version": 1,
-        "selected_candidate": candidate,
-        "frontend_definition_sha256": sha256_bytes(canonical_json_bytes(frontend_definition(candidate))) if candidate in {"A1", "A2"} else HEX64,
-        "readout_path": "readout.json",
-        "readout_sha256": readout_sha,
-        "thresholds": thresholds,
-        "g0_audit_sha256": audit_sha,
-        "source_head": HEX40,
-        "source_tree": "c" * 40,
-    }
-    _write_json(path / "frozen_frontend.json", frontend)
-    checksums = "".join(f"{sha256_file(path / name)}  {name}\n" for name in ("audit.json", "frozen_frontend.json", "readout.json"))
+    if candidate in {"A1", "A2"}:
+        artifacts = build_prerequisite_artifacts(audit, _synthetic_readout())
+        (path / "audit.json").parent.mkdir(parents=True, exist_ok=True)
+        (path / "audit.json").write_bytes(artifacts.audit_bytes)
+        (path / "frozen_frontend.json").write_bytes(artifacts.frontend_bytes)
+        (path / "readout.json").write_bytes(artifacts.readout_bytes)
+    else:
+        _write_json(path / "audit.json", audit)
+        _write_json(path / "frozen_frontend.json", {"forged": True})
+        _write_json(path / "readout.json", {"forged": True})
+    (path / "authorization_manifest.json").write_bytes(authorization_bytes)
+    (path / "config.json").write_bytes(config_bytes)
+    (path / "command.txt").write_text(f"python {G0_REQUIRED_SOURCE_PATHS[1]} --manifest synthetic --output synthetic\n", encoding="utf-8")
+    checksums = "".join(f"{sha256_file(path / name)}  {name}\n" for name in G0_SUCCESS_PACKAGE_FILES)
     (path / "checksums.sha256").write_text(checksums, encoding="utf-8")
     return sha256_file(path / "checksums.sha256")
 
 
 def _make_repo(path: Path) -> tuple[str, str]:
-    for relative in REQUIRED_SOURCE_PATHS:
+    for relative in set(REQUIRED_SOURCE_PATHS).union(G0_REQUIRED_SOURCE_PATHS):
         target = path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO_ROOT / relative, target)
@@ -145,6 +159,46 @@ def _make_repo(path: Path) -> tuple[str, str]:
     return _git(path, "rev-parse", "HEAD"), _git(path, "rev-parse", "HEAD^{tree}")
 
 
+def _run_real_g0_success(repo: Path, root: Path, head: str, tree: str) -> Path:
+    inputs = root / "g0-synthetic-inputs"
+    inputs.mkdir()
+    base = _raw_features(schedule_a())
+    rng = np.random.default_rng(17)
+    input_paths: dict[int, Path] = {}
+    for dataset_id in PERMITTED_INPUT_IDS:
+        features = base.copy()
+        if dataset_id in PERMITTED_INPUT_IDS[:4]:
+            features[:, :2] += 1e-3 * rng.normal(size=(13, 2))
+        path = inputs / f"synthetic-{dataset_id}.json"
+        path.write_bytes(canonical_json_bytes({"fixture": "pure_synthetic", "features": features.tolist()}))
+        input_paths[dataset_id] = path
+    source_files = {relative: sha256_file(repo / relative) for relative in G0_REQUIRED_SOURCE_PATHS}
+    manifest = {
+        "schema_version": 1,
+        "protocol_id": G0_PROTOCOL_ID,
+        "expected_source": {"head": head, "tree": tree},
+        "source_files": source_files,
+        "config": {"path": G0_CONFIG_PATH, "sha256": source_files[G0_CONFIG_PATH]},
+        "inputs": [{"dataset_id": dataset_id, "path": str(input_paths[dataset_id]), "sha256": sha256_file(input_paths[dataset_id])} for dataset_id in PERMITTED_INPUT_IDS],
+        "command_schema": {"runner": G0_REQUIRED_SOURCE_PATHS[1], "required_arguments": ["--manifest", "--output"], "optional_arguments": ["--source-commit"]},
+        "output_schema": G0_OUTPUT_SCHEMA,
+    }
+    manifest_path = root / "g0-synthetic-authorization.json"
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    output = root / "g0-output"
+    completed = subprocess.run(
+        [sys.executable, "-B", str(repo / G0_REQUIRED_SOURCE_PATHS[1]), "--manifest", str(manifest_path), "--output", str(output), "--source-commit", head],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    audit = json.loads((output / "audit.json").read_text())
+    assert audit["status"] == G0_SUCCESS_STATUS and audit["selected_candidate"] == "A1"
+    assert set(path.name for path in output.iterdir()) == set(G0_SUCCESS_PACKAGE_FILES).union({"checksums.sha256"})
+    return output
+
+
 def _make_manifest(path: Path, repo: Path, prerequisite: Path, checksums_sha: str, *, head: str, tree: str) -> dict[str, object]:
     manifest = {
         "schema_version": 1,
@@ -155,6 +209,7 @@ def _make_manifest(path: Path, repo: Path, prerequisite: Path, checksums_sha: st
         "config": {"path": CONFIG_PATH, "sha256": CONFIG_RAW_SHA256},
         "plan": {"path": PLAN_PATH, "sha256": PLAN_RAW_SHA256},
         "prerequisite": {"package_path": str(prerequisite), "checksums_sha256": checksums_sha},
+        "evidence_policy": {"default_mode": EVIDENCE_PRODUCTION, "synthetic_fixture_permitted": True},
         "command_schema": {
             "runner": RUNNER_PATH,
             "required_arguments": ["--manifest", "--output"],
@@ -185,25 +240,47 @@ def _make_execution(path: Path, frozen: object) -> Path:
         for condition in CONDITIONS:
             condition_dir = path / plan_group["group_id"] / condition
             condition_dir.mkdir(parents=True)
-            video = condition_dir / "saved.mp4"
-            video.write_bytes(f"pure synthetic MP4 bytes {group_index} {condition}".encode())
+            video = condition_dir / "synthetic_video.json"
+            _write_json(video, {"schema_version": 1, "evidence_mode": EVIDENCE_SYNTHETIC, "artifact_kind": "synthetic_video_identity", "group_id": plan_group["group_id"], "condition": condition})
             feature_payload = {
-                "source": "pure_synthetic_saved_mp4_fixture",
+                "schema_version": 1,
+                "feature_cache_schema": FEATURE_CACHE_SCHEMA,
+                "evidence_mode": EVIDENCE_SYNTHETIC,
+                "source": "pure_synthetic_feature_fixture",
                 "video_sha256": sha256_file(video),
+                "extractor_identity": {"id": "test_only_synthetic_feature_matrix_v1"},
+                "comparison": {"atol": 0.0, "rtol": 0.0},
                 "features": _artifact_features(condition, group_index).tolist(),
             }
             _write_json(condition_dir / "features.json", feature_payload)
-            for name in ("stdout", "stderr", "config", "environment", "command", "integrity"):
-                (condition_dir / f"{name}.txt").write_text(f"synthetic {name}\n", encoding="utf-8")
+            (condition_dir / "stdout.txt").write_text("synthetic stdout\n", encoding="utf-8")
+            (condition_dir / "stderr.txt").write_text("", encoding="utf-8")
+            saved_video_path = str(video.relative_to(path))
+            _write_json(condition_dir / "config.json", condition_config_payload(frozen, plan_group, condition, latent_sha, saved_video_path, EVIDENCE_SYNTHETIC))
+            _write_json(condition_dir / "environment.json", synthetic_environment_payload(frozen.config))
+            _write_json(condition_dir / "command.json", command_artifact_payload(frozen, EVIDENCE_SYNTHETIC))
+            schedule = schedule_a() if condition == "A" else schedule_b()
+            carrier_records = [] if condition == "OFF" else [
+                {
+                    "call_index": index,
+                    "module_path": frozen.config["carrier"]["module_path"],
+                    "schedule_sha256": sha256_bytes(canonical_json_bytes(schedule)),
+                    "effective_relative_rms": frozen.config["carrier"]["target_relative_rms"],
+                    "evidence_mode": EVIDENCE_SYNTHETIC,
+                    "test_only_synthetic": True,
+                }
+                for index in range(16)
+            ]
+            _write_json(condition_dir / "integrity.json", integrity_artifact_payload(frozen, plan_group, condition, latent_sha, EVIDENCE_SYNTHETIC, carrier_records, None))
             files = {
                 "video": video,
                 "features": condition_dir / "features.json",
                 "stdout": condition_dir / "stdout.txt",
                 "stderr": condition_dir / "stderr.txt",
-                "config": condition_dir / "config.txt",
-                "environment": condition_dir / "environment.txt",
-                "command": condition_dir / "command.txt",
-                "integrity": condition_dir / "integrity.txt",
+                "config": condition_dir / "config.json",
+                "environment": condition_dir / "environment.json",
+                "command": condition_dir / "command.json",
+                "integrity": condition_dir / "integrity.json",
             }
             artifacts = {name: {"path": str(files[name].relative_to(path)), "sha256": sha256_file(files[name])} for name in ARTIFACT_NAMES}
             conditions.append({
@@ -231,9 +308,109 @@ def _make_execution(path: Path, frozen: object) -> Path:
         "protocol_id": PROTOCOL_ID,
         "plan_sha256": PLAN_RAW_SHA256,
         "prerequisite_identity": frozen.prerequisite.identity(),
-        "synthetic_fixture": True,
+        "evidence_mode": EVIDENCE_SYNTHETIC,
+        "evidence_schema": SYNTHETIC_EVIDENCE_SCHEMA,
         "groups": groups,
     }
+    record_path = path / "execution.json"
+    _write_json(record_path, record, pretty=True)
+    return record_path
+
+
+def _write_runtime_mp4(path: Path, *, frame_count: int = 49, fps: int = 8, height: int = 320, width: int = 512, codec: str = "libx264") -> None:
+    import imageio.v3 as iio
+
+    frames = np.zeros((frame_count, height, width, 3), dtype=np.uint8)
+    for index in range(frame_count):
+        frames[index, :, :, 0] = index % 251
+    iio.imwrite(path, frames, plugin="FFMPEG", fps=fps, codec=codec, pixelformat="yuv420p", quality=5, macro_block_size=16)
+
+
+def _production_environment(config: dict[str, object]) -> dict[str, object]:
+    scheduler = {"class": "UniPCMultistepScheduler", "config_sha256": "9" * 64, "bound_to_model_revision": config["model"]["revision"]}
+    return {
+        "schema_version": 1,
+        "artifact_schema": "sc_sstw_rc1_execution_environment_v1",
+        "evidence_mode": EVIDENCE_PRODUCTION,
+        "model_id": config["model"]["id"],
+        "model_revision": config["model"]["revision"],
+        "runtime": {
+            "python": sys.version,
+            "platform": "Linux-6.8-x86_64",
+            "torch": "2.6.0+cu124",
+            "diffusers": "0.35.2",
+            "cuda": "12.4",
+            "gpu": "NVIDIA A100-SXM4-40GB",
+            "versions": {"imageio": "2.37.0", "imageio_ffmpeg": "0.6.0"},
+        },
+        "scheduler": scheduler,
+        "sampler": dict(scheduler),
+    }
+
+
+def _make_production_execution(path: Path, frozen: object) -> Path:
+    template = path.parent / "runtime-generated-template.mp4"
+    _write_runtime_mp4(template)
+    cached_features = extract_feature_matrix(decode_saved_mp4(template))
+    codec_identity = {"container": "mp4", "codec_name": "h264", "pixel_format": "yuv420p", "width": 512, "height": 320, "fps": "8/1", "frame_count": 49, "decodable": True}
+    groups = []
+    for group_index, plan_group in enumerate(frozen.plan["groups"]):
+        parameters = expected_matched_parameters(frozen.config, plan_group)
+        parameter_sha = sha256_bytes(canonical_json_bytes(parameters))
+        latent_sha = hashlib.sha256(f"production-latent:{group_index}".encode()).hexdigest()
+        conditions = []
+        attempts = []
+        for condition in CONDITIONS:
+            condition_dir = path / plan_group["group_id"] / condition
+            condition_dir.mkdir(parents=True)
+            video = condition_dir / "saved.mp4"
+            shutil.copy2(template, video)
+            _write_json(condition_dir / "features.json", {
+                "schema_version": 1,
+                "feature_cache_schema": FEATURE_CACHE_SCHEMA,
+                "evidence_mode": EVIDENCE_PRODUCTION,
+                "source": "recomputed_from_single_saved_mp4",
+                "video_sha256": sha256_file(video),
+                "extractor_identity": {"id": "sc_sstw_learned_observation_saved_mp4_13x30_v1", "source_path": "src/sc_sstw_feasibility/learned_observation.py", "source_sha256": frozen.source_hashes["src/sc_sstw_feasibility/learned_observation.py"]},
+                "comparison": {"atol": 1e-12, "rtol": 0.0},
+                "features": cached_features,
+            })
+            (condition_dir / "stdout.txt").write_text("production-schema synthetic decoder integration\n", encoding="utf-8")
+            (condition_dir / "stderr.txt").write_text("", encoding="utf-8")
+            saved_video_path = str(video.relative_to(path))
+            _write_json(condition_dir / "config.json", condition_config_payload(frozen, plan_group, condition, latent_sha, saved_video_path, EVIDENCE_PRODUCTION))
+            _write_json(condition_dir / "environment.json", _production_environment(frozen.config))
+            _write_json(condition_dir / "command.json", command_artifact_payload(frozen, EVIDENCE_PRODUCTION))
+            schedule = schedule_a() if condition == "A" else schedule_b()
+            carrier_records = [] if condition == "OFF" else [
+                {
+                    "call_index": index,
+                    "module_path": frozen.config["carrier"]["module_path"],
+                    "schedule_sha256": sha256_bytes(canonical_json_bytes(schedule)),
+                    "output_shape": [2, 21, 9600, 1536],
+                    "output_dtype": "torch.bfloat16",
+                    "distinct_storage": True,
+                    "effective_relative_rms": frozen.config["carrier"]["target_relative_rms"],
+                    "evidence_mode": EVIDENCE_PRODUCTION,
+                }
+                for index in range(16)
+            ]
+            _write_json(condition_dir / "integrity.json", integrity_artifact_payload(frozen, plan_group, condition, latent_sha, EVIDENCE_PRODUCTION, carrier_records, codec_identity))
+            files = {
+                "video": video,
+                "features": condition_dir / "features.json",
+                "stdout": condition_dir / "stdout.txt",
+                "stderr": condition_dir / "stderr.txt",
+                "config": condition_dir / "config.json",
+                "environment": condition_dir / "environment.json",
+                "command": condition_dir / "command.json",
+                "integrity": condition_dir / "integrity.json",
+            }
+            artifacts = {name: {"path": str(files[name].relative_to(path)), "sha256": sha256_file(files[name])} for name in ARTIFACT_NAMES}
+            conditions.append({"condition": condition, "schedule_id": {"OFF": "NONE", "A": "A", "B": "B"}[condition], "carrier_enabled": condition != "OFF", "initial_latent_sha256": latent_sha, "matched_parameters_sha256": parameter_sha, "artifacts": artifacts})
+            attempts.append({"condition": condition, "attempt_index": 0, "outcome": "success", "matched_parameters_sha256": parameter_sha})
+        groups.append({"group_id": plan_group["group_id"], "content_grammar": plan_group["content_grammar"], "prompt": plan_group["prompt"], "prompt_sha256": parameters["prompt_sha256"], "seed": plan_group["seed"], "matched_parameters": parameters, "conditions": conditions, "attempts": attempts})
+    record = {"schema_version": 1, "execution_schema": EXECUTION_SCHEMA, "protocol_id": PROTOCOL_ID, "plan_sha256": PLAN_RAW_SHA256, "prerequisite_identity": frozen.prerequisite.identity(), "evidence_mode": EVIDENCE_PRODUCTION, "evidence_schema": PRODUCTION_EVIDENCE_SCHEMA, "groups": groups}
     record_path = path / "execution.json"
     _write_json(record_path, record, pretty=True)
     return record_path
@@ -250,6 +427,20 @@ def environment(tmp_path: Path) -> dict[str, object]:
     frozen = preflight(repo, manifest_path, declared_source_commit=head)
     execution_path = _make_execution(tmp_path / "execution", frozen)
     return {"repo": repo, "prerequisite": prerequisite, "manifest_path": manifest_path, "manifest": manifest, "head": head, "tree": tree, "frozen": frozen, "execution_path": execution_path}
+
+
+def test_real_g0_cli_exports_prerequisite_consumed_by_rc1_preflight(tmp_path: Path) -> None:
+    repo = tmp_path / "combined-repo"
+    head, tree = _make_repo(repo)
+    prerequisite = _run_real_g0_success(repo, tmp_path, head, tree)
+    manifest_path = tmp_path / "rc1-authorization.json"
+    _make_manifest(manifest_path, repo, prerequisite, sha256_file(prerequisite / "checksums.sha256"), head=head, tree=tree)
+    frozen = preflight(repo, manifest_path, declared_source_commit=head)
+    assert frozen.prerequisite.selected_candidate == "A1"
+    assert frozen.prerequisite.source_head == head
+    assert frozen.prerequisite.source_tree == tree
+    produced_readout = json.loads((prerequisite / "readout.json").read_text())
+    assert np.allclose(frozen.prerequisite.readout, np.asarray(produced_readout["coefficients"]), rtol=0.0, atol=0.0)
 
 
 def _rewrite_record(path: Path, mutate) -> None:
@@ -290,6 +481,75 @@ def test_valid_synthetic_execution_scans_every_case_without_averaging(environmen
             assert condition["case_pass"] is True
 
 
+def test_production_saved_mp4_is_decoded_recomputed_and_enters_evaluator(environment: dict[str, object], tmp_path: Path) -> None:
+    record_path = _make_production_execution(tmp_path / "production-execution", environment["frozen"])
+    record, artifacts = validate_execution_record(record_path, environment["frozen"], synthetic_fixture=False)
+    groups, passed = evaluate_execution(record, record_path, artifacts, environment["frozen"], synthetic_fixture=False)
+    assert passed is False
+    assert len(groups) == 2
+    assert record["evidence_mode"] == EVIDENCE_PRODUCTION
+
+
+def test_test_only_synthetic_cannot_masquerade_as_production(environment: dict[str, object]) -> None:
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(environment["execution_path"], environment["frozen"], synthetic_fixture=False)
+    assert _reason(caught) == "EXECUTION_MODE_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["plain_text", "wrong_codec", "wrong_frame_count", "wrong_fps", "wrong_dimensions"],
+)
+def test_saved_mp4_decoder_rejects_invalid_container_codec_and_geometry(tmp_path: Path, variant: str) -> None:
+    path = tmp_path / f"{variant}.mp4"
+    if variant == "plain_text":
+        path.write_text("not a video", encoding="utf-8")
+    else:
+        _write_runtime_mp4(
+            path,
+            codec="mpeg4" if variant == "wrong_codec" else "libx264",
+            frame_count=48 if variant == "wrong_frame_count" else 49,
+            fps=7 if variant == "wrong_fps" else 8,
+            height=304 if variant == "wrong_dimensions" else 320,
+        )
+    with pytest.raises(InvalidExperiment) as caught:
+        _inspect_and_decode_saved_mp4(path)
+    assert caught.value.reason_code in {"SAVED_MP4_INVALID", "SAVED_MP4_CODEC_OR_GEOMETRY_MISMATCH", "SAVED_MP4_DECODE_OR_EXTRACT_FAILURE"}
+
+
+@pytest.mark.parametrize("tamper", ["stored_features", "extractor_identity", "plain_text_video"])
+def test_production_feature_cache_and_video_tampering_are_invalid(environment: dict[str, object], tmp_path: Path, tamper: str) -> None:
+    record_path = _make_production_execution(tmp_path / f"production-{tamper}", environment["frozen"])
+    record = json.loads(record_path.read_text())
+    condition = record["groups"][0]["conditions"][0]
+    feature_path = record_path.parent / condition["artifacts"]["features"]["path"]
+    video_path = record_path.parent / condition["artifacts"]["video"]["path"]
+    if tamper == "plain_text_video":
+        video_path.write_text("plain text with an mp4 extension", encoding="utf-8")
+        condition["artifacts"]["video"]["sha256"] = sha256_file(video_path)
+        payload = json.loads(feature_path.read_text())
+        payload["video_sha256"] = sha256_file(video_path)
+        _write_json(feature_path, payload)
+    else:
+        payload = json.loads(feature_path.read_text())
+        if tamper == "stored_features":
+            payload["features"][0][0] += 0.1
+        else:
+            payload["extractor_identity"]["source_sha256"] = "f" * 64
+        _write_json(feature_path, payload)
+    condition["artifacts"]["features"]["sha256"] = sha256_file(feature_path)
+    _write_json(record_path, record)
+    validated, artifacts = validate_execution_record(record_path, environment["frozen"], synthetic_fixture=False)
+    with pytest.raises(InvalidExperiment) as caught:
+        evaluate_execution(validated, record_path, artifacts, environment["frozen"], synthetic_fixture=False)
+    expected = {
+        "stored_features": "FEATURE_CACHE_RECOMPUTE_MISMATCH",
+        "extractor_identity": "FEATURE_EXTRACTOR_IDENTITY_MISMATCH",
+        "plain_text_video": "SAVED_MP4_INVALID",
+    }
+    assert _reason(caught) == expected[tamper]
+
+
 def test_missing_prerequisite_is_not_invalid_and_precedes_generation_access(tmp_path: Path) -> None:
     with pytest.raises(PrerequisiteNotMet) as caught:
         validate_prerequisite_package(tmp_path / "absent", HEX64)
@@ -310,7 +570,7 @@ def test_forged_candidate_boundary_or_threshold_is_invalid(tmp_path: Path, mutat
     audit = json.loads((package / "audit.json").read_text(encoding="utf-8"))
     mutation(audit)
     _write_json(package / "audit.json", audit)
-    checksums = "".join(f"{sha256_file(package / name)}  {name}\n" for name in ("audit.json", "frozen_frontend.json", "readout.json"))
+    checksums = "".join(f"{sha256_file(package / name)}  {name}\n" for name in G0_SUCCESS_PACKAGE_FILES)
     (package / "checksums.sha256").write_text(checksums, encoding="utf-8")
     with pytest.raises(InvalidExperiment) as caught:
         validate_prerequisite_package(package, sha256_file(package / "checksums.sha256"))
@@ -438,6 +698,49 @@ def test_artifact_replacement_and_retry_parameter_change_are_invalid(environment
     assert _reason(caught) == "TRIPLET_ATTEMPT_LOG_INVALID"
 
 
+@pytest.mark.parametrize(
+    ("artifact_name", "mutate", "reason"),
+    [
+        ("config", lambda value: value["matched_parameters"].update(guidance_scale=9.0), "EXECUTION_CONFIG_INVALID"),
+        ("environment", lambda value: value.update(model_revision=""), "EXECUTION_ENVIRONMENT_INVALID"),
+        ("command", lambda value: value.update(runner="forged_runner.py"), "EXECUTION_COMMAND_INVALID"),
+        ("integrity", lambda value: value.update(seed=999), "EXECUTION_INTEGRITY_INVALID"),
+    ],
+)
+def test_semantic_artifact_fields_are_validated(environment: dict[str, object], artifact_name: str, mutate, reason: str) -> None:
+    record_path = environment["execution_path"]
+    record = json.loads(record_path.read_text())
+    condition = record["groups"][0]["conditions"][0]
+    artifact_path = record_path.parent / condition["artifacts"][artifact_name]["path"]
+    payload = json.loads(artifact_path.read_text())
+    mutate(payload)
+    _write_json(artifact_path, payload)
+    condition["artifacts"][artifact_name]["sha256"] = sha256_file(artifact_path)
+    _write_json(record_path, record)
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(record_path, environment["frozen"], synthetic_fixture=True)
+    assert _reason(caught) == reason
+
+
+@pytest.mark.parametrize("condition", ["OFF", "A", "B"])
+def test_carrier_record_semantics_are_fail_closed(environment: dict[str, object], condition: str) -> None:
+    record_path = environment["execution_path"]
+    record = json.loads(record_path.read_text())
+    condition_record = next(item for item in record["groups"][0]["conditions"] if item["condition"] == condition)
+    integrity_path = record_path.parent / condition_record["artifacts"]["integrity"]["path"]
+    payload = json.loads(integrity_path.read_text())
+    if condition == "OFF":
+        payload["carrier_records"] = [{"forged": True}]
+    else:
+        payload["carrier_records"][0]["schedule_sha256"] = "f" * 64
+    _write_json(integrity_path, payload)
+    condition_record["artifacts"]["integrity"]["sha256"] = sha256_file(integrity_path)
+    _write_json(record_path, record)
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(record_path, environment["frozen"], synthetic_fixture=True)
+    assert _reason(caught) in {"EXECUTION_INTEGRITY_INVALID", "EXECUTION_CARRIER_RECORDS_INVALID"}
+
+
 @pytest.mark.parametrize("bad_condition", ["A", "B", "OFF"])
 def test_cross_template_wrong_window_or_off_false_positive_fails_entire_screen(environment: dict[str, object], bad_condition: str) -> None:
     record_path = environment["execution_path"]
@@ -489,6 +792,22 @@ def test_manifest_forbids_candidate_schedule_and_threshold_injection(environment
         assert _reason(caught) == "MANIFEST_SCHEMA_MISMATCH"
 
 
+def test_production_only_manifest_rejects_synthetic_cli_mode(environment: dict[str, object], tmp_path: Path) -> None:
+    manifest = copy.deepcopy(environment["manifest"])
+    manifest["evidence_policy"]["synthetic_fixture_permitted"] = False
+    _write_json(environment["manifest_path"], manifest)
+    output = tmp_path / "production-only-rejection"
+    completed = subprocess.run(
+        [sys.executable, "-B", str(environment["repo"] / RUNNER_PATH), "--manifest", str(environment["manifest_path"]), "--output", str(output), "--source-commit", environment["head"], "--execution-package", str(environment["execution_path"]), "--synthetic-fixture"],
+        cwd=environment["repo"],
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 2
+    audit = json.loads((output / "audit.json").read_text())
+    assert audit["status"] == STATUS_INVALID and audit["reason_code"] == "EXECUTION_MODE_MISMATCH"
+
+
 def test_cli_real_path_emits_pass_fail_invalid_and_prerequisite_packages(environment: dict[str, object], tmp_path: Path) -> None:
     runner = environment["repo"] / RUNNER_PATH
     base = [sys.executable, "-B", str(runner), "--manifest", str(environment["manifest_path"]), "--source-commit", environment["head"]]
@@ -529,6 +848,87 @@ def test_cli_real_path_emits_pass_fail_invalid_and_prerequisite_packages(environ
     assert not any(token in json.dumps(passing).lower() for token in FORBIDDEN_CLAIM_TOKENS)
 
 
+@pytest.mark.parametrize(
+    ("target", "exception_source", "reason", "exception_type"),
+    [
+        ("validate_execution_record", "RuntimeError('injected ordinary runtime')", "UNEXPECTED_RUNTIME_FAILURE", "RuntimeError"),
+        ("evaluate_execution", "RuntimeError('CUDA out of memory')", "UNEXPECTED_MEMORY_FAILURE", "RuntimeError"),
+        ("evaluate_execution", "MemoryError('injected')", "UNEXPECTED_MEMORY_FAILURE", "MemoryError"),
+        ("validate_execution_record", "TypeError('injected')", "UNEXPECTED_TYPE_FAILURE", "TypeError"),
+        ("evaluate_execution", "subprocess.CalledProcessError(1, ['ffprobe'])", "UNEXPECTED_SUBPROCESS_FAILURE", "CalledProcessError"),
+    ],
+)
+def test_real_cli_packages_ordinary_exception_matrix(environment: dict[str, object], tmp_path: Path, target: str, exception_source: str, reason: str, exception_type: str) -> None:
+    output = tmp_path / f"exception-{reason}-{exception_type}"
+    runner = environment["repo"] / RUNNER_PATH
+    script = (
+        "import runpy,sys,subprocess\n"
+        f"m=runpy.run_path({str(runner)!r}, run_name='rc1_injected_cli')\n"
+        f"def boom(*args, **kwargs): raise {exception_source}\n"
+        f"m['main'].__globals__[{target!r}]=boom\n"
+        f"sys.argv=[{str(runner)!r},'--manifest',{str(environment['manifest_path'])!r},'--output',{str(output)!r},'--source-commit',{str(environment['head'])!r},'--execution-package',{str(environment['execution_path'])!r},'--synthetic-fixture']\n"
+        "raise SystemExit(m['main']())\n"
+    )
+    completed = subprocess.run([sys.executable, "-B", "-c", script], cwd=environment["repo"], text=True, capture_output=True)
+    assert completed.returncode == 2, completed.stderr
+    audit = json.loads((output / "audit.json").read_text())
+    assert audit["status"] == STATUS_INVALID
+    assert audit["reason_code"] == reason
+    assert audit["science_metrics_present"] is False
+    assert "groups" not in audit and "conclusion" not in audit
+    assert audit["integrity_context"]["exception_type"] == exception_type
+    assert audit["integrity_context"]["failure_phase"] in {"execution_package_validation", "saved_mp4_decode_and_evaluation"}
+
+
+def test_cli_does_not_overwrite_existing_output_and_uses_invalid_fallback(environment: dict[str, object], tmp_path: Path) -> None:
+    output = tmp_path / "already-exists"
+    output.mkdir()
+    marker = output / "user-owned.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-B", str(environment["repo"] / RUNNER_PATH), "--manifest", str(environment["manifest_path"]), "--output", str(output), "--source-commit", environment["head"]],
+        cwd=environment["repo"],
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 2
+    assert marker.read_text(encoding="utf-8") == "preserve"
+    report = json.loads(completed.stdout)
+    audit = json.loads(Path(report["audit_path"]).read_text())
+    assert audit["status"] == STATUS_INVALID
+    assert audit["reason_code"] == "OUTPUT_DIRECTORY_UNAVAILABLE"
+    assert audit["science_metrics_present"] is False
+
+
+def test_real_cli_packages_decoder_error_without_science_metrics(environment: dict[str, object], tmp_path: Path) -> None:
+    record_path = _make_production_execution(tmp_path / "decoder-cli-execution", environment["frozen"])
+    record = json.loads(record_path.read_text())
+    condition = record["groups"][0]["conditions"][0]
+    video_path = record_path.parent / condition["artifacts"]["video"]["path"]
+    feature_path = record_path.parent / condition["artifacts"]["features"]["path"]
+    video_path.write_text("corrupt saved MP4", encoding="utf-8")
+    condition["artifacts"]["video"]["sha256"] = sha256_file(video_path)
+    features = json.loads(feature_path.read_text())
+    features["video_sha256"] = sha256_file(video_path)
+    _write_json(feature_path, features)
+    condition["artifacts"]["features"]["sha256"] = sha256_file(feature_path)
+    _write_json(record_path, record)
+    output = tmp_path / "decoder-cli-output"
+    completed = subprocess.run(
+        [sys.executable, "-B", str(environment["repo"] / RUNNER_PATH), "--manifest", str(environment["manifest_path"]), "--output", str(output), "--source-commit", environment["head"], "--execution-package", str(record_path)],
+        cwd=environment["repo"],
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 2, completed.stderr
+    audit = json.loads((output / "audit.json").read_text())
+    assert audit["status"] == STATUS_INVALID
+    assert audit["reason_code"] == "SAVED_MP4_INVALID"
+    assert audit["science_metrics_present"] is False
+    assert "groups" not in audit and "conclusion" not in audit
+    assert audit["integrity_context"]["failure_phase"] == "saved_mp4_decode_and_evaluation"
+
+
 def test_status_vocabulary_claim_ceiling_and_notebook_static_structure() -> None:
     assert {STATUS_PASS, STATUS_FAIL, STATUS_INVALID, STATUS_PREREQUISITE} == {
         "RC1_VALID_PASS", "RC1_VALID_FAIL", "INVALID_EXPERIMENT", "PREREQUISITE_NOT_MET"
@@ -538,7 +938,7 @@ def test_status_vocabulary_claim_ceiling_and_notebook_static_structure() -> None
     source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
     required = (
         "SC_SSTW_RC1_EXACT_REF", "git', 'checkout', '--detach'", "drive.mount", "torch.cuda.is_available",
-        "--generate", "try:", "finally:", "make_archive", "shutil.copy2", "sha256(drive_copy)", "testzip()", "verification.json", "packaged = True",
+        "--generate", "synthetic_fixture_permitted': False", "try:", "finally:", "make_archive", "shutil.copy2", "sha256(drive_copy)", "testzip()", "verification.json", "packaged = True",
     )
     assert all(token in source for token in required)
     assert "checkout exact ref" not in source.lower()
@@ -547,3 +947,59 @@ def test_status_vocabulary_claim_ceiling_and_notebook_static_structure() -> None
             compile("".join(cell["source"]), NOTEBOOK_PATH, "exec")
     config = json.loads((REPO_ROOT / CONFIG_PATH).read_text())
     assert tuple(config["forbidden_claims"]) == FORBIDDEN_CLAIM_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("status", "returncode", "valid"),
+    [
+        (STATUS_PASS, 0, True),
+        (STATUS_FAIL, 3, True),
+        (STATUS_PREREQUISITE, 2, False),
+        (STATUS_INVALID, 2, False),
+    ],
+)
+def test_notebook_runner_status_helper_accepts_all_four_consistent_states(tmp_path: Path, status: str, returncode: int, valid: bool) -> None:
+    notebook = json.loads((REPO_ROOT / NOTEBOOK_PATH).read_text(encoding="utf-8"))
+    source = "".join(notebook["cells"][1]["source"])
+    parsed = ast.parse(source)
+    function = next(node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name == "load_runner_audit")
+    namespace = {"json": json}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), NOTEBOOK_PATH, "exec"), namespace)
+    audit = {
+        "schema_version": 1,
+        "output_schema": OUTPUT_SCHEMA,
+        "protocol_id": PROTOCOL_ID,
+        "status": status,
+        "valid_experiment": valid,
+        "reason_code": "SYNTHETIC_NOTEBOOK_HELPER_TEST",
+        "formal_result": False,
+        "stage_progression_allowed": False,
+    }
+    audit_path = tmp_path / "audit.json"
+    _write_json(audit_path, audit)
+    assert namespace["load_runner_audit"](SimpleNamespace(returncode=returncode), audit_path) == audit
+
+
+@pytest.mark.parametrize("case", ["missing", "malformed", "exit_mismatch", "status_mismatch", "boundary_mismatch"])
+def test_notebook_runner_status_helper_rejects_exceptional_or_inconsistent_results(tmp_path: Path, case: str) -> None:
+    notebook = json.loads((REPO_ROOT / NOTEBOOK_PATH).read_text(encoding="utf-8"))
+    source = "".join(notebook["cells"][1]["source"])
+    parsed = ast.parse(source)
+    function = next(node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name == "load_runner_audit")
+    namespace = {"json": json}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), NOTEBOOK_PATH, "exec"), namespace)
+    path = tmp_path / "audit.json"
+    returncode = 0
+    if case == "malformed":
+        path.write_text("{", encoding="utf-8")
+    elif case != "missing":
+        audit = {"schema_version": 1, "output_schema": OUTPUT_SCHEMA, "protocol_id": PROTOCOL_ID, "status": STATUS_PASS, "valid_experiment": True, "reason_code": "TEST", "formal_result": False, "stage_progression_allowed": False}
+        if case == "exit_mismatch":
+            returncode = 3
+        elif case == "status_mismatch":
+            audit["status"] = "NOT_A_STATE"
+        else:
+            audit["formal_result"] = True
+        _write_json(path, audit)
+    with pytest.raises(RuntimeError):
+        namespace["load_runner_audit"](SimpleNamespace(returncode=returncode), path)

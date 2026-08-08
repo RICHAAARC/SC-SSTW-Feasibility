@@ -52,6 +52,22 @@ mismatched conditions are invalid. Video, logs, command, environment, config,
 and integrity records are independently hashed. This preparation task creates
 no formal video.
 
+Execution evidence has two non-interchangeable schemas. The default
+`production_saved_mp4` mode independently probes and decodes each actual H.264
+MP4, verifies yuv420p, 49 frames, 8 fps, 320×512 geometry, and recomputes the
+frozen 13×30 public feature matrix from that saved file. The stored matrix is
+only a cache and must match recomputation at rtol 0 and atol 1e-12. Extractor
+ID, source path, raw source hash, and schema version are bound. Config,
+environment, command, and integrity artifacts are parsed and checked
+semantically; hashes alone are insufficient.
+
+The separate `test_only_synthetic` schema is admitted only when both the
+manifest evidence policy and explicit CLI flag permit it. It uses structured
+synthetic video identities and cannot be consumed as production evidence. The
+formal notebook requires a production-only manifest and never supplies the
+synthetic flag. Decoder or extractor unavailability is invalid; there is no
+fallback to cached or synthetic features.
+
 ### Blind evaluator
 
 The frozen selected frontend/readout maps each single saved MP4 to one 13×2
@@ -77,3 +93,11 @@ The maximum wording for `RC1_VALID_PASS` is exactly:
 It does not state method validation or open GPU, L2, robustness, private-key,
 fixed-FPR, or paper claims. Local tests and notebook dry-runs remain
 implementation evidence only.
+
+The CLI wraps ordinary prerequisite, generation, package-validation, decode,
+extraction, evaluation, and package-write exceptions into a minimal invalid
+package with a stable reason and failure phase. KeyboardInterrupt and
+SystemExit retain their normal interruption semantics. The notebook preserves
+runner nonzero status: exit 3 plus a schema-valid `RC1_VALID_FAIL` is a
+legitimate scientific failure, not a runner exception, and still reaches the
+failure-safe archive and Drive-copy verification logic.

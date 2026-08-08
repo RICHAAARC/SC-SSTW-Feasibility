@@ -18,6 +18,8 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .rc1_prerequisite import build_prerequisite_artifacts
+
 
 PROTOCOL_ID = "sc_sstw_learned_observation_l1_v2_development"
 MANIFEST_SCHEMA_VERSION = 1
@@ -37,7 +39,8 @@ RUNNER_PATH = "experiments/run_learned_observation_l1_v2_development.py"
 PROTOCOL_PATH = "protocols/gpu_learned_observation_l1_v2.md"
 LIBRARY_PATH = "src/sc_sstw_feasibility/learned_observation_l1_v2.py"
 TEST_PATH = "tests/test_learned_observation_l1_v2_development.py"
-REQUIRED_SOURCE_PATHS = (CONFIG_PATH, RUNNER_PATH, PROTOCOL_PATH, LIBRARY_PATH, TEST_PATH)
+RC1_PREREQUISITE_LIBRARY_PATH = "src/sc_sstw_feasibility/rc1_prerequisite.py"
+REQUIRED_SOURCE_PATHS = (CONFIG_PATH, RUNNER_PATH, PROTOCOL_PATH, LIBRARY_PATH, RC1_PREREQUISITE_LIBRARY_PATH, TEST_PATH)
 
 ABSOLUTE_THRESHOLDS = {
     "max_residual": 0.25,
@@ -538,6 +541,19 @@ def evaluate_gate(raw_features: Mapping[int, np.ndarray]) -> tuple[list[dict[str
         if result["development_gate_pass"]:
             return results, candidate
     return results, None
+
+
+def build_selected_prerequisite(preflight_result: Preflight, audit: Mapping[str, Any], selected: str | None) -> Any:
+    """Recompute the final fit and build RC1 artifacts from the real G0 path."""
+
+    if selected not in CANDIDATE_ORDER:
+        raise InvalidExperiment("PREREQUISITE_EXPORT_NOT_AUTHORIZED", "G0 did not select an authorized candidate")
+    transformed = [transform(preflight_result.features[dataset_id], selected) for dataset_id in FIT_IDS]
+    readout = fit_readout(transformed)
+    try:
+        return build_prerequisite_artifacts(audit, readout)
+    except (TypeError, ValueError) as exc:
+        raise InvalidExperiment("PREREQUISITE_EXPORT_INTEGRITY_FAILURE", "G0 success could not be bound to RC1 artifacts") from exc
 
 
 def base_audit() -> dict[str, Any]:

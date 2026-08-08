@@ -12,7 +12,9 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import shlex
 import subprocess
+import shutil
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -27,6 +29,13 @@ from .learned_observation_l1_v2 import (
     SUCCESS_STATUS as G0_SUCCESS_STATUS,
     TEMPORAL_POINTS as G0_TEMPORAL_POINTS,
     transform as g0_transform,
+)
+from .rc1_prerequisite import (
+    FRONTEND_SCHEMA,
+    G0_SUCCESS_PACKAGE_FILES,
+    PREREQUISITE_FILES,
+    READOUT_SCHEMA,
+    frontend_definition,
 )
 
 
@@ -43,6 +52,8 @@ RUNNER_PATH = "experiments/run_rc1_method_validation.py"
 NOTEBOOK_PATH = "notebooks/sc_sstw_rc1_method_validation.ipynb"
 TEST_PATH = "tests/test_rc1_method_validation.py"
 G0_LIBRARY_PATH = "src/sc_sstw_feasibility/learned_observation_l1_v2.py"
+PREREQUISITE_LIBRARY_PATH = "src/sc_sstw_feasibility/rc1_prerequisite.py"
+EXTRACTOR_LIBRARY_PATH = "src/sc_sstw_feasibility/learned_observation.py"
 REQUIRED_SOURCE_PATHS = (
     CONFIG_PATH,
     PLAN_PATH,
@@ -53,6 +64,8 @@ REQUIRED_SOURCE_PATHS = (
     NOTEBOOK_PATH,
     TEST_PATH,
     G0_LIBRARY_PATH,
+    PREREQUISITE_LIBRARY_PATH,
+    EXTRACTOR_LIBRARY_PATH,
 )
 
 CONFIG_RAW_SHA256 = "8accea693798e2dd2ad4451ea14df71651116b89e3d8707cfe344886a57bcf15"
@@ -83,8 +96,14 @@ FORBIDDEN_CLAIM_TOKENS = (
     "paper_claim",
 )
 THRESHOLD_KEYS = tuple(G0_ABSOLUTE_THRESHOLDS)
-PREREQUISITE_FILES = ("audit.json", "frozen_frontend.json", "readout.json")
 ARTIFACT_NAMES = ("video", "features", "stdout", "stderr", "config", "environment", "command", "integrity")
+EVIDENCE_PRODUCTION = "production_saved_mp4"
+EVIDENCE_SYNTHETIC = "test_only_synthetic"
+PRODUCTION_EVIDENCE_SCHEMA = "sc_sstw_rc1_execution_production_saved_mp4_v1"
+SYNTHETIC_EVIDENCE_SCHEMA = "sc_sstw_rc1_execution_test_only_synthetic_v1"
+FEATURE_CACHE_SCHEMA = "sc_sstw_rc1_feature_cache_v1"
+FEATURE_EXTRACTOR_ID = "sc_sstw_learned_observation_saved_mp4_13x30_v1"
+FEATURE_CACHE_ATOL = 1e-12
 
 
 class InvalidExperiment(RuntimeError):
@@ -318,7 +337,7 @@ def _forbidden_path(path_text: str) -> bool:
 def validate_manifest_schema(manifest: Mapping[str, Any]) -> None:
     _require_exact_keys(
         manifest,
-        {"schema_version", "manifest_schema", "protocol_id", "expected_source", "source_files", "config", "plan", "prerequisite", "command_schema", "output_schema"},
+        {"schema_version", "manifest_schema", "protocol_id", "expected_source", "source_files", "config", "plan", "prerequisite", "evidence_policy", "command_schema", "output_schema"},
         "MANIFEST_SCHEMA_MISMATCH",
     )
     if manifest["schema_version"] != 1 or manifest["manifest_schema"] != MANIFEST_SCHEMA or manifest["protocol_id"] != PROTOCOL_ID:
@@ -349,6 +368,12 @@ def validate_manifest_schema(manifest: Mapping[str, Any]) -> None:
         raise InvalidExperiment("MANIFEST_SCHEMA_MISMATCH", "prerequisite path or digest is malformed")
     if _forbidden_path(prerequisite["package_path"]):
         raise InvalidExperiment("FORBIDDEN_FORMAL_PATH", "formal 41001-41008 path segments are forbidden")
+    policy = manifest["evidence_policy"]
+    if not isinstance(policy, Mapping):
+        raise InvalidExperiment("MANIFEST_SCHEMA_MISMATCH", "evidence policy must be an object")
+    _require_exact_keys(policy, {"default_mode", "synthetic_fixture_permitted"}, "MANIFEST_SCHEMA_MISMATCH")
+    if policy["default_mode"] != EVIDENCE_PRODUCTION or not isinstance(policy["synthetic_fixture_permitted"], bool):
+        raise InvalidExperiment("EXECUTION_MODE_MISMATCH", "manifest evidence policy changed")
     command = manifest["command_schema"]
     if command != {
         "runner": RUNNER_PATH,
@@ -356,17 +381,6 @@ def validate_manifest_schema(manifest: Mapping[str, Any]) -> None:
         "optional_arguments": ["--source-commit", "--execution-package", "--generate", "--synthetic-fixture"],
     }:
         raise InvalidExperiment("COMMAND_SCHEMA_MISMATCH", "command schema is not authorized")
-
-
-def frontend_definition(candidate: str) -> dict[str, Any]:
-    if candidate not in {"A1", "A2"}:
-        raise InvalidExperiment("PREREQUISITE_CANDIDATE_INVALID", "selected candidate must be A1 or A2")
-    return {
-        "candidate": candidate,
-        "normalization": {"mad_scale": 1.4826, "mad_floor": 1e-6, "clip_min": -6.0, "clip_max": 6.0},
-        "high_pass": candidate == "A2",
-        "readout": {"kind": "linear_affine", "shape": [31, 2], "fit_intercept": True},
-    }
 
 
 def _parse_checksums(raw: bytes) -> dict[str, str]:
@@ -380,14 +394,12 @@ def _parse_checksums(raw: bytes) -> dict[str, str]:
         if len(parts) != 2 or not _is_sha256(parts[0]) or not parts[1] or "/" in parts[1] or parts[1] in parsed:
             raise InvalidExperiment("PREREQUISITE_CHECKSUMS_INVALID", "checksum line is malformed")
         parsed[parts[1]] = parts[0]
-    if tuple(sorted(parsed)) != tuple(sorted(PREREQUISITE_FILES)):
-        raise InvalidExperiment("PREREQUISITE_CHECKSUMS_INVALID", "prerequisite file set changed")
     return parsed
 
 
 def _validate_thresholds(value: Any) -> dict[str, float]:
-    if not isinstance(value, Mapping) or tuple(value) != THRESHOLD_KEYS:
-        raise InvalidExperiment("PREREQUISITE_THRESHOLDS_INVALID", "threshold key set or order changed")
+    if not isinstance(value, Mapping) or set(value) != set(THRESHOLD_KEYS):
+        raise InvalidExperiment("PREREQUISITE_THRESHOLDS_INVALID", "threshold key set changed")
     thresholds = {key: float(value[key]) for key in THRESHOLD_KEYS}
     if not all(math.isfinite(item) for item in thresholds.values()):
         raise InvalidExperiment("PREREQUISITE_THRESHOLDS_INVALID", "thresholds must be finite")
@@ -409,8 +421,10 @@ def validate_prerequisite_package(package_path: Path, expected_checksums_sha256:
     if checksums_sha != expected_checksums_sha256:
         raise InvalidExperiment("PREREQUISITE_CHECKSUMS_HASH_MISMATCH", "prerequisite checksum-file digest changed")
     declared = _parse_checksums(checksums_raw)
+    if "audit.json" not in declared:
+        raise InvalidExperiment("PREREQUISITE_CHECKSUMS_INVALID", "G0 audit is absent from the checksum set")
     raw_files: dict[str, bytes] = {}
-    for name in PREREQUISITE_FILES:
+    for name in declared:
         path = package_path / name
         if path.is_symlink() or not path.is_file():
             raise InvalidExperiment("PREREQUISITE_FILE_MISSING", f"prerequisite file missing: {name}")
@@ -424,6 +438,8 @@ def validate_prerequisite_package(package_path: Path, expected_checksums_sha256:
         raise InvalidExperiment("PREREQUISITE_AUDIT_IDENTITY_MISMATCH", "L1-v2 protocol or schema changed")
     if audit.get("valid_experiment") is not True or audit.get("status") != G0_SUCCESS_STATUS:
         raise PrerequisiteNotMet("PREREQUISITE_SELECTED_CANDIDATE_NOT_READY", "L1-v2 package has no qualifying selected candidate")
+    if tuple(sorted(declared)) != tuple(sorted(G0_SUCCESS_PACKAGE_FILES)):
+        raise InvalidExperiment("PREREQUISITE_CHECKSUMS_INVALID", "successful G0 package file set changed")
     if audit.get("formal_result") is not False or audit.get("stage_progression_allowed") is not False:
         raise InvalidExperiment("PREREQUISITE_EVIDENCE_BOUNDARY_INVALID", "L1-v2 package overstates its evidence boundary")
     selected = audit.get("selected_candidate")
@@ -438,6 +454,19 @@ def validate_prerequisite_package(package_path: Path, expected_checksums_sha256:
     config_identity = audit.get("config_identity")
     if not isinstance(config_identity, Mapping) or config_identity.get("path") != G0_CONFIG_PATH or not _is_sha256(config_identity.get("sha256")):
         raise InvalidExperiment("PREREQUISITE_CONFIG_IDENTITY_INVALID", "L1-v2 config identity is incomplete")
+    manifest_identity = audit.get("manifest_identity")
+    if not isinstance(manifest_identity, Mapping) or not _is_sha256(manifest_identity.get("sha256")):
+        raise InvalidExperiment("PREREQUISITE_MANIFEST_IDENTITY_INVALID", "L1-v2 manifest identity is incomplete")
+    if sha256_bytes(raw_files["authorization_manifest.json"]) != manifest_identity["sha256"]:
+        raise InvalidExperiment("PREREQUISITE_MANIFEST_IDENTITY_INVALID", "packaged G0 manifest differs from the audit binding")
+    if sha256_bytes(raw_files["config.json"]) != config_identity["sha256"]:
+        raise InvalidExperiment("PREREQUISITE_CONFIG_IDENTITY_INVALID", "packaged G0 config differs from the audit binding")
+    try:
+        command_parts = shlex.split(raw_files["command.txt"].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise InvalidExperiment("PREREQUISITE_COMMAND_INVALID", "packaged G0 command is malformed") from exc
+    if not any(part.endswith(G0_REQUIRED_SOURCE_PATHS[1]) for part in command_parts) or "--manifest" not in command_parts or "--output" not in command_parts:
+        raise InvalidExperiment("PREREQUISITE_COMMAND_INVALID", "packaged G0 command does not identify the authorized runner")
     input_hashes = audit.get("input_sha256")
     if not isinstance(input_hashes, Mapping) or tuple(sorted(input_hashes)) != tuple(str(item) for item in G0_INPUT_IDS) or not all(_is_sha256(item) for item in input_hashes.values()):
         raise InvalidExperiment("PREREQUISITE_INPUT_IDENTITY_INVALID", "L1-v2 input identity is incomplete")
@@ -450,20 +479,40 @@ def validate_prerequisite_package(package_path: Path, expected_checksums_sha256:
     thresholds = _validate_thresholds(selected_traces[0].get("derived_envelope"))
 
     frontend = _json_object(raw_files["frozen_frontend.json"], "PREREQUISITE_FRONTEND_INVALID")
-    _require_exact_keys(frontend, {"schema_version", "selected_candidate", "frontend_definition_sha256", "readout_path", "readout_sha256", "thresholds", "g0_audit_sha256", "source_head", "source_tree"}, "PREREQUISITE_FRONTEND_INVALID")
+    _require_exact_keys(frontend, {"schema_version", "frontend_schema", "selected_candidate", "frontend_definition_sha256", "readout_path", "readout_sha256", "thresholds", "g0_identity"}, "PREREQUISITE_FRONTEND_INVALID")
     expected_frontend_sha = sha256_bytes(canonical_json_bytes(frontend_definition(selected)))
-    if frontend["schema_version"] != 1 or frontend["selected_candidate"] != selected or frontend["frontend_definition_sha256"] != expected_frontend_sha:
+    if frontend["schema_version"] != 2 or frontend["frontend_schema"] != FRONTEND_SCHEMA or frontend["selected_candidate"] != selected or frontend["frontend_definition_sha256"] != expected_frontend_sha:
         raise InvalidExperiment("PREREQUISITE_FRONTEND_INVALID", "frontend definition or selected candidate changed")
     if frontend["readout_path"] != "readout.json" or frontend["readout_sha256"] != declared["readout.json"]:
         raise InvalidExperiment("PREREQUISITE_READOUT_IDENTITY_INVALID", "readout identity changed")
-    if frontend["g0_audit_sha256"] != declared["audit.json"] or frontend["source_head"] != source_state["head"] or frontend["source_tree"] != source_state["tree"]:
-        raise InvalidExperiment("PREREQUISITE_SOURCE_IDENTITY_INVALID", "frontend binding to G0 audit/source changed")
+    expected_g0_identity = {
+        "protocol_id": G0_PROTOCOL_ID,
+        "output_schema": G0_OUTPUT_SCHEMA,
+        "audit_sha256": declared["audit.json"],
+        "manifest_sha256": manifest_identity["sha256"],
+        "config_identity": dict(config_identity),
+        "source_state": {"head": source_state["head"], "tree": source_state["tree"], "dirty": False},
+        "source_file_sha256": dict(source_hashes),
+        "input_sha256": dict(input_hashes),
+    }
+    if frontend["g0_identity"] != expected_g0_identity:
+        raise InvalidExperiment("PREREQUISITE_SOURCE_IDENTITY_INVALID", "frontend binding to G0 audit/source/input changed")
     if _validate_thresholds(frontend["thresholds"]) != thresholds:
         raise InvalidExperiment("PREREQUISITE_THRESHOLDS_INVALID", "frontend thresholds differ from selected-candidate trace")
 
     readout_payload = _json_object(raw_files["readout.json"], "PREREQUISITE_READOUT_INVALID")
-    _require_exact_keys(readout_payload, {"schema_version", "selected_candidate", "shape", "coefficients"}, "PREREQUISITE_READOUT_INVALID")
-    if readout_payload["schema_version"] != 1 or readout_payload["selected_candidate"] != selected or readout_payload["shape"] != [31, 2]:
+    _require_exact_keys(readout_payload, {"schema_version", "readout_schema", "selected_candidate", "shape", "fit_dataset_ids", "input_sha256", "source_head", "source_tree", "config_sha256", "coefficients"}, "PREREQUISITE_READOUT_INVALID")
+    if (
+        readout_payload["schema_version"] != 2
+        or readout_payload["readout_schema"] != READOUT_SCHEMA
+        or readout_payload["selected_candidate"] != selected
+        or readout_payload["shape"] != [31, 2]
+        or readout_payload["fit_dataset_ids"] != list(G0_INPUT_IDS[:4])
+        or readout_payload["input_sha256"] != {str(value): input_hashes[str(value)] for value in G0_INPUT_IDS[:4]}
+        or readout_payload["source_head"] != source_state["head"]
+        or readout_payload["source_tree"] != source_state["tree"]
+        or readout_payload["config_sha256"] != config_identity["sha256"]
+    ):
         raise InvalidExperiment("PREREQUISITE_READOUT_INVALID", "readout metadata changed")
     try:
         readout = np.asarray(readout_payload["coefficients"], dtype=np.float64)
@@ -569,6 +618,159 @@ def expected_matched_parameters(config: Mapping[str, Any], group: Mapping[str, A
     }
 
 
+def condition_config_payload(preflight_result: Preflight, group: Mapping[str, Any], condition: str, latent_sha: str, saved_video_path: str, evidence_mode: str) -> dict[str, Any]:
+    parameters = expected_matched_parameters(preflight_result.config, group)
+    return {
+        "schema_version": 1,
+        "artifact_schema": "sc_sstw_rc1_condition_config_v1",
+        "protocol_id": PROTOCOL_ID,
+        "evidence_mode": evidence_mode,
+        "group_id": group["group_id"],
+        "condition": condition,
+        "schedule_id": {"OFF": "NONE", "A": "A", "B": "B"}[condition],
+        "carrier_enabled": condition != "OFF",
+        "initial_latent_sha256": latent_sha,
+        "matched_parameters": parameters,
+        "matched_parameters_sha256": sha256_bytes(canonical_json_bytes(parameters)),
+        "frozen_prerequisite_identity": preflight_result.prerequisite.identity(),
+        "saved_video_path": saved_video_path,
+    }
+
+
+def command_artifact_payload(preflight_result: Preflight, evidence_mode: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "artifact_schema": "sc_sstw_rc1_execution_command_v1",
+        "evidence_mode": evidence_mode,
+        "runner": RUNNER_PATH,
+        "action": "generate" if evidence_mode == EVIDENCE_PRODUCTION else "validate_test_only_synthetic_execution",
+        "source_commit": preflight_result.source_state.head,
+        "manifest_sha256": sha256_bytes(preflight_result.manifest_bytes),
+        "synthetic_fixture_authorized": evidence_mode == EVIDENCE_SYNTHETIC,
+    }
+
+
+def synthetic_environment_payload(config: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "artifact_schema": "sc_sstw_rc1_execution_environment_v1",
+        "evidence_mode": EVIDENCE_SYNTHETIC,
+        "model_id": config["model"]["id"],
+        "model_revision": config["model"]["revision"],
+        "runtime": {"kind": "pure_synthetic_test_runtime"},
+        "scheduler": {"kind": "pure_synthetic_test_only"},
+        "sampler": {"kind": "pure_synthetic_test_only"},
+    }
+
+
+def integrity_artifact_payload(
+    preflight_result: Preflight,
+    group: Mapping[str, Any],
+    condition: str,
+    latent_sha: str,
+    evidence_mode: str,
+    carrier_records: Sequence[Mapping[str, Any]],
+    codec_identity: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    parameters = expected_matched_parameters(preflight_result.config, group)
+    extractor = (
+        {
+            "id": FEATURE_EXTRACTOR_ID,
+            "source_path": EXTRACTOR_LIBRARY_PATH,
+            "source_sha256": preflight_result.source_hashes[EXTRACTOR_LIBRARY_PATH],
+            "cache_atol": FEATURE_CACHE_ATOL,
+            "cache_rtol": 0.0,
+        }
+        if evidence_mode == EVIDENCE_PRODUCTION
+        else {"id": "test_only_synthetic_feature_matrix_v1"}
+    )
+    return {
+        "schema_version": 1,
+        "artifact_schema": "sc_sstw_rc1_execution_integrity_v1",
+        "evidence_mode": evidence_mode,
+        "group_id": group["group_id"],
+        "condition": condition,
+        "prompt_sha256": parameters["prompt_sha256"],
+        "seed": parameters["seed"],
+        "initial_latent_sha256": latent_sha,
+        "model_id": parameters["model_id"],
+        "model_revision": parameters["model_revision"],
+        "matched_parameters_sha256": sha256_bytes(canonical_json_bytes(parameters)),
+        "schedule_id": {"OFF": "NONE", "A": "A", "B": "B"}[condition],
+        "carrier_enabled": condition != "OFF",
+        "carrier_records": [dict(item) for item in carrier_records],
+        "codec_identity": dict(codec_identity) if codec_identity is not None else None,
+        "feature_extractor": extractor,
+    }
+
+
+def _validate_environment_payload(payload: Mapping[str, Any], config: Mapping[str, Any], evidence_mode: str) -> None:
+    _require_exact_keys(payload, {"schema_version", "artifact_schema", "evidence_mode", "model_id", "model_revision", "runtime", "scheduler", "sampler"}, "EXECUTION_ENVIRONMENT_INVALID")
+    if payload["schema_version"] != 1 or payload["artifact_schema"] != "sc_sstw_rc1_execution_environment_v1" or payload["evidence_mode"] != evidence_mode:
+        raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "environment schema or evidence mode changed")
+    if payload["model_id"] != config["model"]["id"] or payload["model_revision"] != config["model"]["revision"]:
+        raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "environment model identity changed")
+    if evidence_mode == EVIDENCE_SYNTHETIC:
+        if payload != synthetic_environment_payload(config):
+            raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "synthetic environment identity changed")
+        return
+    runtime = payload["runtime"]
+    scheduler = payload["scheduler"]
+    sampler = payload["sampler"]
+    if not isinstance(runtime, Mapping) or set(runtime) != {"python", "platform", "torch", "diffusers", "cuda", "gpu", "versions"}:
+        raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "production runtime identity is incomplete")
+    if any(not isinstance(runtime[key], str) or not runtime[key].strip() for key in ("python", "platform", "torch", "diffusers", "cuda", "gpu")):
+        raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "production runtime contains an empty identity")
+    placeholder_tokens = ("placeholder", "unknown", "test-only", "synthetic", "not-executed")
+    if any(any(token in runtime[key].lower() for token in placeholder_tokens) for key in ("platform", "torch", "diffusers", "cuda", "gpu")):
+        raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "production runtime contains a placeholder identity")
+    if not isinstance(runtime["versions"], Mapping) or not runtime["versions"] or any(not isinstance(value, str) or not value for value in runtime["versions"].values()):
+        raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "production dependency identity is incomplete")
+    for value in (scheduler, sampler):
+        if not isinstance(value, Mapping) or set(value) != {"class", "config_sha256", "bound_to_model_revision"}:
+            raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "scheduler or sampler identity is incomplete")
+        if not isinstance(value["class"], str) or not value["class"].strip() or not _is_sha256(value["config_sha256"]) or value["bound_to_model_revision"] != config["model"]["revision"]:
+            raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "scheduler or sampler identity is contradictory")
+        if any(token in value["class"].lower() for token in placeholder_tokens):
+            raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "scheduler or sampler class is a placeholder")
+    if scheduler != sampler:
+        raise InvalidExperiment("EXECUTION_ENVIRONMENT_INVALID", "scheduler and sampler frozen identity differ")
+
+
+def _validate_carrier_records(records: Any, condition: str, config: Mapping[str, Any], evidence_mode: str) -> None:
+    if condition == "OFF":
+        if records != []:
+            raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "OFF condition must have no carrier records")
+        return
+    if not isinstance(records, list) or len(records) != 16:
+        raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "A/B condition requires exactly 16 carrier records")
+    expected_schedule = schedule_a() if condition == "A" else schedule_b()
+    expected_schedule_sha = sha256_bytes(canonical_json_bytes(expected_schedule))
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "carrier record must be an object")
+        required = {"call_index", "module_path", "schedule_sha256", "effective_relative_rms", "evidence_mode"}
+        if not required.issubset(record) or record["call_index"] != index or record["module_path"] != config["carrier"]["module_path"] or record["schedule_sha256"] != expected_schedule_sha or record["evidence_mode"] != evidence_mode:
+            raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "carrier record identity or order changed")
+        try:
+            rms = float(record["effective_relative_rms"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "carrier RMS is malformed") from exc
+        if not math.isfinite(rms) or abs(rms - float(config["carrier"]["target_relative_rms"])) > float(config["carrier"]["target_relative_rms_absolute_tolerance"]):
+            raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "carrier RMS differs from the frozen target")
+        if evidence_mode == EVIDENCE_PRODUCTION and (record.get("distinct_storage") is not True or not isinstance(record.get("output_shape"), list) or not isinstance(record.get("output_dtype"), str)):
+            raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "production carrier record lacks actual tensor integrity")
+        if evidence_mode == EVIDENCE_SYNTHETIC and record.get("test_only_synthetic") is not True:
+            raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "synthetic carrier record lacks test-only labeling")
+
+
+def _load_artifact_json(path: Path, reason: str) -> dict[str, Any]:
+    try:
+        return _json_object(path.read_bytes(), reason)
+    except OSError as exc:
+        raise InvalidExperiment(reason, "semantic artifact could not be read") from exc
+
+
 def _artifact_path(execution_path: Path, artifact: Mapping[str, Any]) -> Path:
     path_text = artifact.get("path")
     if not isinstance(path_text, str) or not path_text or _forbidden_path(path_text):
@@ -582,25 +784,27 @@ def _artifact_path(execution_path: Path, artifact: Mapping[str, Any]) -> Path:
     return resolved
 
 
-def validate_execution_record(record_path: Path, preflight_result: Preflight, *, synthetic_fixture: bool) -> tuple[dict[str, Any], dict[tuple[str, str], Path]]:
+def validate_execution_record(record_path: Path, preflight_result: Preflight, *, synthetic_fixture: bool) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Path]]]:
     if _forbidden_path(str(record_path)):
         raise InvalidExperiment("FORBIDDEN_FORMAL_PATH", "execution record path uses a forbidden formal ID")
     if record_path.is_symlink() or not record_path.is_file():
         raise InvalidExperiment("EXECUTION_RECORD_MISSING", "matched-triplet execution record is missing")
     record = _json_object(record_path.read_bytes(), "EXECUTION_RECORD_INVALID_JSON")
-    _require_exact_keys(record, {"schema_version", "execution_schema", "protocol_id", "plan_sha256", "prerequisite_identity", "synthetic_fixture", "groups"}, "EXECUTION_SCHEMA_MISMATCH")
+    _require_exact_keys(record, {"schema_version", "execution_schema", "protocol_id", "plan_sha256", "prerequisite_identity", "evidence_mode", "evidence_schema", "groups"}, "EXECUTION_SCHEMA_MISMATCH")
     if record["schema_version"] != 1 or record["execution_schema"] != EXECUTION_SCHEMA or record["protocol_id"] != PROTOCOL_ID:
         raise InvalidExperiment("EXECUTION_SCHEMA_MISMATCH", "execution version or protocol changed")
     if record["plan_sha256"] != PLAN_RAW_SHA256 or record["prerequisite_identity"] != preflight_result.prerequisite.identity():
         raise InvalidExperiment("EXECUTION_IDENTITY_MISMATCH", "execution plan or prerequisite identity changed")
-    if record["synthetic_fixture"] is not synthetic_fixture:
+    expected_mode = EVIDENCE_SYNTHETIC if synthetic_fixture else EVIDENCE_PRODUCTION
+    expected_evidence_schema = SYNTHETIC_EVIDENCE_SCHEMA if synthetic_fixture else PRODUCTION_EVIDENCE_SCHEMA
+    if record["evidence_mode"] != expected_mode or record["evidence_schema"] != expected_evidence_schema:
         raise InvalidExperiment("EXECUTION_MODE_MISMATCH", "synthetic/formal execution mode is mislabeled")
     groups = record["groups"]
     plan_groups = preflight_result.plan["groups"]
     if not isinstance(groups, list) or [item.get("group_id") for item in groups if isinstance(item, Mapping)] != [item["group_id"] for item in plan_groups]:
         raise InvalidExperiment("TRIPLET_GROUP_SET_MISMATCH", "execution groups do not match the frozen plan")
 
-    artifact_paths: dict[tuple[str, str], Path] = {}
+    artifact_paths: dict[tuple[str, str], dict[str, Path]] = {}
     pending_hashes: list[tuple[str, Path, str]] = []
     for group_record, plan_group in zip(groups, plan_groups, strict=True):
         if not isinstance(group_record, Mapping):
@@ -618,6 +822,8 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
         if not isinstance(conditions, list) or [item.get("condition") for item in conditions if isinstance(item, Mapping)] != list(CONDITIONS):
             raise InvalidExperiment("TRIPLET_CONDITION_SET_MISMATCH", "triplet must contain exactly ordered OFF/A/B")
         latent_hashes: set[str] = set()
+        group_environment: dict[str, Any] | None = None
+        group_command: dict[str, Any] | None = None
         for condition_record in conditions:
             _require_exact_keys(condition_record, {"condition", "schedule_id", "carrier_enabled", "initial_latent_sha256", "matched_parameters_sha256", "artifacts"}, "TRIPLET_SCHEMA_MISMATCH")
             condition = condition_record["condition"]
@@ -632,6 +838,7 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
             artifacts = condition_record["artifacts"]
             if not isinstance(artifacts, Mapping) or tuple(artifacts) != ARTIFACT_NAMES:
                 raise InvalidExperiment("TRIPLET_ARTIFACT_SET_MISMATCH", "condition artifact set changed")
+            condition_paths: dict[str, Path] = {}
             for artifact_name in ARTIFACT_NAMES:
                 identity = artifacts[artifact_name]
                 if not isinstance(identity, Mapping):
@@ -641,8 +848,8 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
                     raise InvalidExperiment("TRIPLET_ARTIFACT_IDENTITY_INVALID", "artifact digest is malformed")
                 path = _artifact_path(record_path, identity)
                 pending_hashes.append((f"{group_record['group_id']}:{condition}:{artifact_name}", path, identity["sha256"]))
-                if artifact_name == "features":
-                    artifact_paths[(group_record["group_id"], condition)] = path
+                condition_paths[artifact_name] = path
+            artifact_paths[(group_record["group_id"], condition)] = condition_paths
         if len(latent_hashes) != 1:
             raise InvalidExperiment("TRIPLET_LATENT_MISMATCH", "OFF/A/B do not share one actual initial latent identity")
         attempts = group_record["attempts"]
@@ -663,6 +870,54 @@ def validate_execution_record(record_path: Path, preflight_result: Preflight, *,
             raise InvalidExperiment("TRIPLET_ARTIFACT_MISSING", f"execution artifact missing: {label}")
         if sha256_file(path) != expected_sha:
             raise InvalidExperiment("TRIPLET_ARTIFACT_HASH_MISMATCH", f"execution artifact digest changed: {label}")
+    for group_record, plan_group in zip(groups, plan_groups, strict=True):
+        group_environment = None
+        group_command = None
+        for condition_record in group_record["conditions"]:
+            condition = condition_record["condition"]
+            paths = artifact_paths[(group_record["group_id"], condition)]
+            config_payload = _load_artifact_json(paths["config"], "EXECUTION_CONFIG_INVALID")
+            expected_config = condition_config_payload(
+                preflight_result,
+                plan_group,
+                condition,
+                condition_record["initial_latent_sha256"],
+                condition_record["artifacts"]["video"]["path"],
+                expected_mode,
+            )
+            if config_payload != expected_config:
+                raise InvalidExperiment("EXECUTION_CONFIG_INVALID", "condition config differs from frozen parameters")
+            environment_payload = _load_artifact_json(paths["environment"], "EXECUTION_ENVIRONMENT_INVALID")
+            _validate_environment_payload(environment_payload, preflight_result.config, expected_mode)
+            if group_environment is None:
+                group_environment = environment_payload
+            elif environment_payload != group_environment:
+                raise InvalidExperiment("TRIPLET_PARAMETER_MISMATCH", "OFF/A/B runtime environment differs")
+            command_payload = _load_artifact_json(paths["command"], "EXECUTION_COMMAND_INVALID")
+            if command_payload != command_artifact_payload(preflight_result, expected_mode):
+                raise InvalidExperiment("EXECUTION_COMMAND_INVALID", "execution command identity changed")
+            if group_command is None:
+                group_command = command_payload
+            elif command_payload != group_command:
+                raise InvalidExperiment("TRIPLET_PARAMETER_MISMATCH", "OFF/A/B command identity differs")
+            integrity_payload = _load_artifact_json(paths["integrity"], "EXECUTION_INTEGRITY_INVALID")
+            expected_integrity = integrity_artifact_payload(
+                preflight_result,
+                plan_group,
+                condition,
+                condition_record["initial_latent_sha256"],
+                expected_mode,
+                integrity_payload.get("carrier_records", []) if isinstance(integrity_payload, Mapping) else [],
+                integrity_payload.get("codec_identity") if isinstance(integrity_payload, Mapping) else None,
+            )
+            if integrity_payload != expected_integrity:
+                raise InvalidExperiment("EXECUTION_INTEGRITY_INVALID", "integrity metadata differs from frozen execution identity")
+            _validate_carrier_records(integrity_payload["carrier_records"], condition, preflight_result.config, expected_mode)
+            if expected_mode == EVIDENCE_SYNTHETIC:
+                synthetic_video = _load_artifact_json(paths["video"], "SYNTHETIC_VIDEO_IDENTITY_INVALID")
+                expected_synthetic_video = {"schema_version": 1, "evidence_mode": EVIDENCE_SYNTHETIC, "artifact_kind": "synthetic_video_identity", "group_id": group_record["group_id"], "condition": condition}
+                if synthetic_video != expected_synthetic_video:
+                    raise InvalidExperiment("SYNTHETIC_VIDEO_IDENTITY_INVALID", "synthetic video identity is malformed")
     return record, artifact_paths
 
 
@@ -718,30 +973,83 @@ def observe_features(features: np.ndarray, prerequisite: FrozenPrerequisite) -> 
     return np.column_stack((transformed, np.ones(13))) @ prerequisite.readout
 
 
-def _load_feature_artifact(path: Path, expected_video_sha: str, *, synthetic_fixture: bool) -> np.ndarray:
-    payload = _json_object(path.read_bytes(), "FEATURE_ARTIFACT_INVALID")
-    _require_exact_keys(payload, {"source", "video_sha256", "features"}, "FEATURE_ARTIFACT_INVALID")
-    expected_source = "pure_synthetic_saved_mp4_fixture" if synthetic_fixture else "single_saved_mp4_only"
-    if payload.get("source") != expected_source or payload.get("video_sha256") != expected_video_sha:
-        raise InvalidExperiment("FEATURE_ARTIFACT_IDENTITY_MISMATCH", "feature source or saved-MP4 binding changed")
+def _inspect_and_decode_saved_mp4(path: Path) -> tuple[dict[str, Any], np.ndarray]:
+    if path.suffix.lower() != ".mp4":
+        raise InvalidExperiment("SAVED_MP4_INVALID", "production video does not use an MP4 path")
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        raise InvalidExperiment("SAVED_MP4_DECODER_UNAVAILABLE", "ffprobe is unavailable")
+    try:
+        completed = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt,width,height,avg_frame_rate,nb_frames:format=format_name", "-of", "json", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        probe = json.loads(completed.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise InvalidExperiment("SAVED_MP4_INVALID", "saved MP4 could not be probed") from exc
+    streams = probe.get("streams")
+    format_name = probe.get("format", {}).get("format_name") if isinstance(probe.get("format"), Mapping) else None
+    if not isinstance(streams, list) or len(streams) != 1 or not isinstance(format_name, str) or "mp4" not in format_name.split(","):
+        raise InvalidExperiment("SAVED_MP4_INVALID", "saved MP4 container or stream count changed")
+    stream = streams[0]
+    expected_stream = {"codec_name": "h264", "pix_fmt": "yuv420p", "width": 512, "height": 320, "avg_frame_rate": "8/1", "nb_frames": "49"}
+    if {key: stream.get(key) for key in expected_stream} != expected_stream:
+        raise InvalidExperiment("SAVED_MP4_CODEC_OR_GEOMETRY_MISMATCH", "codec, dimensions, FPS, or frame count changed")
+    try:
+        from .learned_observation import decode_saved_mp4, extract_feature_matrix
+
+        frames = decode_saved_mp4(path)
+        features = np.asarray(extract_feature_matrix(frames), dtype=np.float64)
+    except Exception as exc:
+        raise InvalidExperiment("SAVED_MP4_DECODE_OR_EXTRACT_FAILURE", "saved MP4 decode or frozen feature extraction failed") from exc
+    identity = {"container": "mp4", "codec_name": "h264", "pixel_format": "yuv420p", "width": 512, "height": 320, "fps": "8/1", "frame_count": 49, "decodable": True}
+    return identity, features
+
+
+def _load_feature_artifact(paths: Mapping[str, Path], expected_video_sha: str, preflight_result: Preflight, evidence_mode: str) -> np.ndarray:
+    payload = _json_object(paths["features"].read_bytes(), "FEATURE_ARTIFACT_INVALID")
+    _require_exact_keys(payload, {"schema_version", "feature_cache_schema", "evidence_mode", "source", "video_sha256", "extractor_identity", "comparison", "features"}, "FEATURE_ARTIFACT_INVALID")
+    if payload["schema_version"] != 1 or payload["feature_cache_schema"] != FEATURE_CACHE_SCHEMA or payload["evidence_mode"] != evidence_mode or payload["video_sha256"] != expected_video_sha:
+        raise InvalidExperiment("FEATURE_ARTIFACT_IDENTITY_MISMATCH", "feature schema, mode, or saved-MP4 binding changed")
+    if evidence_mode == EVIDENCE_PRODUCTION:
+        expected_extractor = {"id": FEATURE_EXTRACTOR_ID, "source_path": EXTRACTOR_LIBRARY_PATH, "source_sha256": preflight_result.source_hashes[EXTRACTOR_LIBRARY_PATH]}
+        if payload["source"] != "recomputed_from_single_saved_mp4" or payload["extractor_identity"] != expected_extractor or payload["comparison"] != {"atol": FEATURE_CACHE_ATOL, "rtol": 0.0}:
+            raise InvalidExperiment("FEATURE_EXTRACTOR_IDENTITY_MISMATCH", "frozen production extractor identity changed")
+    else:
+        if payload["source"] != "pure_synthetic_feature_fixture" or payload["extractor_identity"] != {"id": "test_only_synthetic_feature_matrix_v1"} or payload["comparison"] != {"atol": 0.0, "rtol": 0.0}:
+            raise InvalidExperiment("FEATURE_ARTIFACT_IDENTITY_MISMATCH", "synthetic feature cache is not explicitly test-only")
     try:
         features = np.asarray(payload["features"], dtype=np.float64)
     except (KeyError, TypeError, ValueError) as exc:
         raise InvalidExperiment("FEATURE_MATRIX_INVALID", "feature matrix cannot be decoded") from exc
     if features.shape != (13, 30) or not np.isfinite(features).all():
         raise InvalidExperiment("FEATURE_MATRIX_INVALID", "feature matrix must be finite 13x30")
+    if evidence_mode == EVIDENCE_PRODUCTION:
+        codec_identity, recomputed = _inspect_and_decode_saved_mp4(paths["video"])
+        if recomputed.shape != (13, 30) or not np.isfinite(recomputed).all():
+            raise InvalidExperiment("FEATURE_RECOMPUTE_INVALID", "frozen extractor did not return finite 13x30 features")
+        if not np.allclose(features, recomputed, rtol=0.0, atol=FEATURE_CACHE_ATOL):
+            raise InvalidExperiment("FEATURE_CACHE_RECOMPUTE_MISMATCH", "stored feature cache differs from saved-MP4 recomputation")
+        integrity = _load_artifact_json(paths["integrity"], "EXECUTION_INTEGRITY_INVALID")
+        if integrity.get("codec_identity") != codec_identity:
+            raise InvalidExperiment("SAVED_MP4_IDENTITY_MISMATCH", "integrity metadata differs from independently decoded MP4")
+        return recomputed
     return features
 
 
-def evaluate_execution(record: Mapping[str, Any], record_path: Path, artifact_paths: Mapping[tuple[str, str], Path], preflight_result: Preflight, *, synthetic_fixture: bool) -> tuple[list[dict[str, Any]], bool]:
+def evaluate_execution(record: Mapping[str, Any], record_path: Path, artifact_paths: Mapping[tuple[str, str], Mapping[str, Path]], preflight_result: Preflight, *, synthetic_fixture: bool) -> tuple[list[dict[str, Any]], bool]:
     schedules = {"A": schedule_a(), "B": schedule_b()}
+    evidence_mode = EVIDENCE_SYNTHETIC if synthetic_fixture else EVIDENCE_PRODUCTION
     group_results: list[dict[str, Any]] = []
     for group in record["groups"]:
         condition_results: list[dict[str, Any]] = []
         for condition_record in group["conditions"]:
             condition = condition_record["condition"]
             video_sha = condition_record["artifacts"]["video"]["sha256"]
-            features = _load_feature_artifact(artifact_paths[(group["group_id"], condition)], video_sha, synthetic_fixture=synthetic_fixture)
+            features = _load_feature_artifact(artifact_paths[(group["group_id"], condition)], video_sha, preflight_result, evidence_mode)
             observation = observe_features(features, preflight_result.prerequisite)
             templates: dict[str, list[dict[str, Any]]] = {}
             for template_id in TEMPLATES:
@@ -828,7 +1136,8 @@ def valid_audit(preflight_result: Preflight, execution_record: Mapping[str, Any]
             "frozen_thresholds": preflight_result.prerequisite.thresholds,
             "execution_record_sha256": execution_record_sha256,
             "triplet_execution_identity": execution_identity,
-            "synthetic_fixture": execution_record["synthetic_fixture"],
+            "evidence_mode": execution_record["evidence_mode"],
+            "test_only_synthetic": execution_record["evidence_mode"] == EVIDENCE_SYNTHETIC,
             "schedule_preflight": schedule_preflight(),
             "evaluation_budget": {"templates": list(TEMPLATES), "start_indices": list(START_INDICES), "equal_for_all_conditions": True},
             "groups": groups,

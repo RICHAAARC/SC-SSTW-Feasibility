@@ -44,3 +44,13 @@ commit and is never embedded in that commit, avoiding self-reference.
 Normal packages record manifest/config/source/input identity, candidate order,
 per-gate decisions, and the terminal state. Invalid packages contain a stable
 reason code and integrity context but no development metrics or conclusion.
+
+Only a valid successful runner path may additionally export the RC1
+prerequisite artifacts. The runner recomputes the final selected A1/A2 readout
+from the four frozen training inputs and writes `frozen_frontend.json` and
+`readout.json` beside the real G0 `audit.json`. Their shared schema binds the
+exact audit, manifest, config, clean HEAD/tree, source-file hashes, all six
+input hashes, selected candidate, derived envelope, and final-fit readout.
+The package checksum covers every delivered file. A scientific failure or any
+invalid run does not emit either RC1 prerequisite artifact. This export is
+implementation plumbing only and does not imply an independent G0 pass.
