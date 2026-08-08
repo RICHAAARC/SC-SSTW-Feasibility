@@ -1,0 +1,18 @@
+{
+  "protocol_id": "sc_sstw_learned_observation_l1_v2_development",
+  "status": "development_only",
+  "datasets": {"fit": [41001, 41002, 41003, 41004], "diagnostic": [41005, 41006], "fresh_held_out_forbidden": [41007, 41008]},
+  "candidates": [
+    {"id": "A1", "formula": "per-video featurewise (x-median)/(1.4826*MAD floored at 1e-6), clipped to [-6,6]"},
+    {"id": "A2", "formula": "A1 then length-preserving high-pass: y0=x0-x1; yt=xt-(x[t-1]+x[t+1])/2; yN=xN-x[N-1]"}
+  ],
+  "normalization": {"mad_scale": 1.4826, "mad_floor": 1e-6, "clip_min": -6.0, "clip_max": 6.0},
+  "readout": {"kind": "linear_affine", "ridge": 1e-6, "fit_intercept": true, "target": "public_13_point_temporal_schedule"},
+  "acquisition": {"template_length": 6, "candidate_start_indices": [0,1,2,3,4,5,6,7], "correct_start_index": 0, "deletions": false},
+  "threshold_derivation": "train-only leave-one-video-out correct-window envelope: residual/H-MSE/condition maxima and global/affine-s2 minima; no diagnostic-set input",
+  "final_acceptance": "all five derived metric thresholds pass",
+  "selection": "A1 if development gate passes; else A2 if it passes; else STOP_NOT_GPU_READY",
+  "development_gate": "41005 and 41006 correct start passes and every wrong start fails final acceptance",
+  "old_l1_status": "Contradicted",
+  "l2_default": "closed"
+}
