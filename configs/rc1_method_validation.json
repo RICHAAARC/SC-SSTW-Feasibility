@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "protocol_id": "sc_sstw_rc1_saved_mp4_relation_validation",
+  "evidence_class": "implementation_and_synthetic_preflight_only",
+  "g0_baseline": {
+    "commit": "3d7913f01f0315094a223a930bd71239f5ea56a5",
+    "tree": "0814b3dd63383315239f22873f7b6aff2cdf8d7e",
+    "independent_implementation_gate": "NOT_PASSED"
+  },
+  "schedules": {
+    "A": {
+      "source_module": "sc_sstw_feasibility.learned_observation_l1_v2",
+      "source_symbol": "TEMPORAL_POINTS",
+      "template_id": "burst_alpha"
+    },
+    "B": {
+      "derivation": "schedule_A_with_indices_4_and_5_swapped",
+      "swapped_indices": [4, 5]
+    },
+    "cross_residual_preflight": {
+      "expected_A_observation_by_B_template": 0.761311945935564,
+      "expected_B_observation_by_A_template": 0.761311945935564,
+      "absolute_tolerance": 1e-09,
+      "evidence_label": "protocol_synthetic_preflight_only"
+    }
+  },
+  "triplets": {
+    "plan_path": "plans/rc1_matched_triplets.json",
+    "required_group_count": 2,
+    "condition_order": ["OFF", "A", "B"],
+    "only_allowed_difference": "carrier_condition_and_schedule",
+    "content_grammar_must_be_heterogeneous": true
+  },
+  "model": {
+    "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"
+  },
+  "carrier": {
+    "kind": "dit_internal_self_attention_output_residual",
+    "module_path": "transformer.blocks[29].attn1",
+    "block_index": 29,
+    "target_relative_rms": 0.03,
+    "target_relative_rms_absolute_tolerance": 0.00005,
+    "apply_to": "8_steps_each_cond_then_uncond_16_calls"
+  },
+  "generation": {
+    "scheduler": "WanPipeline_frozen_default_for_revision",
+    "sampler": "WanPipeline_frozen_default_for_revision",
+    "inference_steps": 8,
+    "guidance_scale": 5.0,
+    "height": 320,
+    "width": 512,
+    "frame_count": 49,
+    "fps": 8,
+    "dtype": "torch.bfloat16",
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple scenes, flicker"
+  },
+  "encoding": {
+    "call": "diffusers.utils.export_to_video",
+    "container": "mp4",
+    "codec": "h264",
+    "pixel_format": "yuv420p",
+    "quality": 5.0,
+    "bitrate": null,
+    "macro_block_size": 16,
+    "fallback_permitted": false
+  },
+  "frozen_prerequisite": {
+    "protocol_id": "sc_sstw_learned_observation_l1_v2_development",
+    "output_schema": "sc_sstw_l1_v2_development_audit_v1",
+    "required_status": "READY_TO_PREREGISTER_FRESH_GPU_GATE",
+    "allowed_selected_candidates": ["A1", "A2"],
+    "frontend": "from_prerequisite_package_only",
+    "readout": "from_prerequisite_package_only",
+    "thresholds": "from_prerequisite_package_only"
+  },
+  "evaluation": {
+    "start_indices": [0, 1, 2, 3, 4, 5, 6, 7],
+    "template_order": ["A", "B"],
+    "equal_budget_for_every_condition_and_template": true,
+    "fresh_training": false,
+    "fresh_threshold_calibration": false,
+    "fresh_candidate_selection": false,
+    "all_groups_and_cases_must_pass": true,
+    "averaging_or_majority_vote": false
+  },
+  "states": {
+    "pass": "RC1_VALID_PASS",
+    "fail": "RC1_VALID_FAIL",
+    "invalid": "INVALID_EXPERIMENT",
+    "prerequisite_missing": "PREREQUISITE_NOT_MET"
+  },
+  "pass_conclusion_limit": "causal saved-MP4 public relation mechanism screen passed under this frozen RC1 protocol",
+  "forbidden_claims": [
+    "method_validated",
+    "gpu_ready",
+    "l2",
+    "owner_wrong_key",
+    "robust",
+    "fixed_fpr",
+    "paper_claim"
+  ],
+  "manifest_schema": "sc_sstw_rc1_authorization_manifest_v1",
+  "execution_schema": "sc_sstw_rc1_matched_triplet_execution_v1",
+  "output_schema": "sc_sstw_rc1_method_validation_audit_v1",
+  "formal_result": false,
+  "stage_progression_allowed": false
+}

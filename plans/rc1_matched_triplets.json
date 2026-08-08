@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "protocol_id": "sc_sstw_rc1_saved_mp4_relation_validation",
+  "plan_id": "rc1_two_heterogeneous_matched_triplets_v1",
+  "group_order": ["orbital_glass", "articulated_paper"],
+  "groups": [
+    {
+      "group_id": "orbital_glass",
+      "content_grammar": "multi_object_counter_rotation",
+      "prompt": "locked overhead camera, three small colored glass beads counter-rotating around fixed triangular table marks, continuous periodic motion, matte charcoal surface, stable soft lighting, no text, no cuts",
+      "seed": 52001,
+      "initial_noise_policy": "one_actual_latent_tensor_created_once_then_cloned_for_OFF_A_B",
+      "conditions": ["OFF", "A", "B"]
+    },
+    {
+      "group_id": "articulated_paper",
+      "content_grammar": "articulated_surface_deformation",
+      "prompt": "locked oblique camera, a striped paper accordion repeatedly unfolds and refolds in place while its cast shadow changes shape, pale wooden surface, stable studio lighting, no text, no cuts",
+      "seed": 52002,
+      "initial_noise_policy": "one_actual_latent_tensor_created_once_then_cloned_for_OFF_A_B",
+      "conditions": ["OFF", "A", "B"]
+    }
+  ],
+  "matched_fields": [
+    "prompt",
+    "prompt_sha256",
+    "seed",
+    "initial_latent_sha256",
+    "model_id",
+    "model_revision",
+    "scheduler",
+    "sampler",
+    "inference_steps",
+    "guidance_scale",
+    "height",
+    "width",
+    "frame_count",
+    "fps",
+    "dtype",
+    "negative_prompt",
+    "encoder_call",
+    "container",
+    "codec",
+    "pixel_format",
+    "quality",
+    "bitrate",
+    "macro_block_size",
+    "execution_path"
+  ],
+  "only_allowed_difference": "carrier_condition_and_schedule",
+  "retry_policy": "no_parameter_change_and_no_silent_relabel;every_attempt_is_recorded",
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
