@@ -1,0 +1,90 @@
+{
+  "schema": "sc_sstw_rc0_pixel_chroma_fast_cpu_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "questions": {
+    "step1_carrier_survival": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"],
+    "step2_relation_readout": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"]
+  },
+  "source": {
+    "run_id": "dfa1c782d409fa02",
+    "zip_path": "/mnt/g/我的云端硬盘/SC-SSTW-Feasibility/rc0-diag-vae-latent-inference-mode/rc0-dfa1c782d409fa02.zip",
+    "zip_size": 397216,
+    "zip_sha256": "76ddc314132dfc208ebc6dbc04bdbe77ca5da731b16c0345eb139a661c378a4f",
+    "members": {
+      "orbital_glass": {
+        "path": "actual-package/generation/orbital_glass/OFF_R1/saved.mp4",
+        "size": 25630,
+        "sha256": "2eb2f33e8b90ec9b8a4e3079425439abc3c7984d667b68a7b7b4f6ec59860e40"
+      },
+      "articulated_paper": {
+        "path": "actual-package/generation/articulated_paper/OFF_R1/saved.mp4",
+        "size": 42053,
+        "sha256": "1f99673db08015a5afcf26c985d5c8d84601735b7c14f9b1ca40ff549ba2a276"
+      }
+    }
+  },
+  "experiment": {
+    "group_order": ["orbital_glass", "articulated_paper"],
+    "condition_order": ["OFF_R1", "OFF_R2", "A", "B"],
+    "attempt_budget": 8,
+    "retry_policy": "no_retry_no_replacement_no_additional_attempts",
+    "source_frame_policy": "one_exact_decoded_OFF_R1_frame_array_reused_for_all_four_conditions_in_group"
+  },
+  "carrier": {
+    "kind": "post_decode_pre_h264_pixel_chroma_relation_residual",
+    "input": "normalized_RGB_float32_shape_49x320x512x3",
+    "phi_x": "cos(2*pi*x/512)",
+    "phi_y": "cos(2*pi*y/320)",
+    "u": [0.7071067811865475, -0.7071067811865475, 0.0],
+    "v": [0.4082482904638631, 0.4082482904638631, -0.8164965809277261],
+    "frame_point_indices": [0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8, 8, 9, 9, 9, 9, 10, 10, 10, 10, 11, 11, 11, 11, 12, 12, 12, 12],
+    "schedule_A_source": "sc_sstw_feasibility.rc0_causal_localization_v2.schedule_a",
+    "schedule_B_source": "sc_sstw_feasibility.rc0_causal_localization_v2.schedule_b",
+    "raw_formula": "schedule_x_times_phi_x_times_u_plus_schedule_y_times_phi_y_times_v",
+    "normalization": "subtract_one_global_mean_then_divide_by_one_global_RMS_over_entire_clip",
+    "target_rms": 0.023529411764705882,
+    "target_rms_expression": "6/255",
+    "clip_range": [0.0, 1.0],
+    "off_residual": 0.0,
+    "dtype": "float32"
+  },
+  "encoding": {
+    "call": "imageio.v3.imwrite",
+    "plugin": "FFMPEG",
+    "container": "mp4",
+    "codec": "libx264",
+    "required_codec_name": "h264",
+    "pixel_format": "yuv420p",
+    "width": 512,
+    "height": 320,
+    "frame_count": 49,
+    "fps": 8,
+    "quality": 5.0,
+    "macro_block_size": 16
+  },
+  "level_p": {
+    "implementation": "sc_sstw_feasibility.rc0_causal_localization_v2.level_p_metrics",
+    "absolute_effect_min": 0.00784313725490196,
+    "relative_noise_multiplier": 3.0,
+    "off_noise_max": 0.00392156862745098,
+    "all_cells": "both_groups_times_A_B_must_pass"
+  },
+  "level_r": {
+    "run_only_if_step1_feasible": true,
+    "extractor": "sc_sstw_feasibility.learned_observation.extract_feature_matrix",
+    "implementation": "sc_sstw_feasibility.rc0_causal_localization_v2.level_r_metrics",
+    "off_reference": "elementwise_mean_OFF_R1_OFF_R2",
+    "templates": ["A", "B"],
+    "start_indices": [0, 1, 2, 3, 4, 5, 6, 7],
+    "maximum_relation_residual": 0.25,
+    "all_cells": "both_groups_times_A_B_must_pass"
+  },
+  "routes": {
+    "p_fail": "CURRENT_CARRIER_NOT_FEASIBLE",
+    "p_pass_r_pass": "KEEP_CARRIER_BUILD_BLIND_READOUT",
+    "p_pass_r_fail": "KEEP_CARRIER_SWITCH_TO_VAE_READOUT",
+    "insufficient": "DIAGNOSTIC_INSUFFICIENT"
+  },
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
