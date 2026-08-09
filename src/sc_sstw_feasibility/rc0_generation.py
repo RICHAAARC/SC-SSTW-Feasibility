@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-import os
 from pathlib import Path
 import platform
 import shutil
@@ -303,12 +302,6 @@ def _load_production_pipeline(wan_pipeline: Any, torch: Any, resolved_snapshot: 
         local_files_only=True,
     )
     pipe.enable_model_cpu_offload()
-    pipe.vae.enable_tiling(
-        tile_sample_min_height=192,
-        tile_sample_min_width=192,
-        tile_sample_stride_height=128,
-        tile_sample_stride_width=128,
-    )
     if not str(pipe._execution_device).startswith("cuda"):
         raise RC0GenerationError("Wan CPU offload did not retain a CUDA execution device")
     return pipe
@@ -400,6 +393,8 @@ def construct_final_latent_relation_residual(
 
 
 def _decode_final_wan_latent(pipe: Any, torch: Any, final_latent: Any) -> Any:
+    if torch.is_grad_enabled() or not torch.is_inference_mode_enabled():
+        raise RC0GenerationError("manual Wan VAE decode must run inside torch inference mode")
     latents = final_latent.to(pipe.vae.dtype)
     latents_mean = torch.tensor(pipe.vae.config.latents_mean).view(1, pipe.vae.config.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
     latents_std = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(1, pipe.vae.config.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
@@ -421,27 +416,28 @@ def _run_production_condition(pipe: Any, torch: Any, preflight_result: Preflight
         latents=latent,
         output_type="latent",
     )
-    final_latent = result.frames
-    if schedule is not None:
-        carrier = diagnostic_carrier_config(preflight_result)["carrier"]
-        modified, metrics = construct_final_latent_relation_residual(final_latent, schedule, carrier)
-        primitives.append(
-            {
-                "call_index": 0,
-                "injection_stage": carrier["injection_stage"],
-                "latent_layout": carrier["tensor_layout"],
-                "schedule_point_count": 13,
-                "output_shape": list(final_latent.shape),
-                "output_dtype": str(final_latent.dtype),
-                "input_tensor_sha256": tensor_identity(final_latent)["sha256"],
-                "modified_tensor_sha256": tensor_identity(modified)["sha256"],
-                "distinct_storage": _storage_pointer(modified) != _storage_pointer(final_latent),
-                **metrics,
-            }
-        )
-        final_latent = modified
-    decoded = _decode_final_wan_latent(pipe, torch, final_latent)
-    frames = decoded[0] if len(decoded) == 1 else decoded
+    with torch.inference_mode():
+        final_latent = result.frames
+        if schedule is not None:
+            carrier = diagnostic_carrier_config(preflight_result)["carrier"]
+            modified, metrics = construct_final_latent_relation_residual(final_latent, schedule, carrier)
+            primitives.append(
+                {
+                    "call_index": 0,
+                    "injection_stage": carrier["injection_stage"],
+                    "latent_layout": carrier["tensor_layout"],
+                    "schedule_point_count": 13,
+                    "output_shape": list(final_latent.shape),
+                    "output_dtype": str(final_latent.dtype),
+                    "input_tensor_sha256": tensor_identity(final_latent)["sha256"],
+                    "modified_tensor_sha256": tensor_identity(modified)["sha256"],
+                    "distinct_storage": _storage_pointer(modified) != _storage_pointer(final_latent),
+                    **metrics,
+                }
+            )
+            final_latent = modified
+        decoded = _decode_final_wan_latent(pipe, torch, final_latent)
+        frames = decoded[0] if len(decoded) == 1 else decoded
     encode_saved_mp4(frames, video_path)
     return primitives
 
@@ -540,23 +536,6 @@ def _run_generation_control_flow(
         ):
             raise RC0GenerationError("local model snapshot differs from the frozen revision")
         pipe = _load_production_pipeline(WanPipeline, torch, resolved_snapshot)
-        vae_memory_policy = {
-            "vae_use_tiling": bool(pipe.vae.use_tiling),
-            "tile_sample_min_height": int(pipe.vae.tile_sample_min_height),
-            "tile_sample_min_width": int(pipe.vae.tile_sample_min_width),
-            "tile_sample_stride_height": int(pipe.vae.tile_sample_stride_height),
-            "tile_sample_stride_width": int(pipe.vae.tile_sample_stride_width),
-            "allocator": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
-        }
-        if vae_memory_policy != {
-            "vae_use_tiling": True,
-            "tile_sample_min_height": 192,
-            "tile_sample_min_width": 192,
-            "tile_sample_stride_height": 128,
-            "tile_sample_stride_width": 128,
-            "allocator": "expandable_segments:True",
-        }:
-            raise RC0GenerationError("Wan VAE memory policy differs from the frozen diagnostic setting")
         observed_revision = frozen_revision
         scheduler = {
             "class": type(pipe.scheduler).__name__,
@@ -569,7 +548,6 @@ def _run_generation_control_flow(
             "scheduler": scheduler,
             "dtype": str(next(pipe.transformer.parameters()).dtype),
             "device": str(pipe._execution_device),
-            "vae_memory_policy": vae_memory_policy,
             "cpu_only_test_harness": False,
         }
     else:
