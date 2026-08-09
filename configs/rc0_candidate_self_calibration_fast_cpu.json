@@ -1,0 +1,66 @@
+{
+  "schema": "sc_sstw_rc0_candidate_self_calibration_fast_cpu_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "question": "step4_capture_and_candidate_wise_self_calibration_are_structurally_separated",
+  "input": {
+    "step3_commit": "b5c2cf62fc21f00f72e5a223af82e9acf19a746e",
+    "step3_tree": "3a5562cdabac1a9adfca404cb89bce6b0976fb1d",
+    "step3_audit_path": "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-aisb-capture-fast-cpu-dff72da-run1/audit.json",
+    "step3_audit_sha256": "6e424acbd21a36c0c965581e475a7e03440051ad62925c37fceecb3ac1c8ba6f",
+    "step3_independent_path": "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-aisb-capture-fast-cpu-dff72da-run1.independent.json",
+    "step3_independent_sha256": "606d868b11fc49ee673040dca93ac6df657831ac215004c4e60500f2531b1059",
+    "video_source": "redecode_the_same_eight_SHA_bound_saved_mp4_artifacts_and_recompute_frozen_30D",
+    "paired_difference": "F(condition)-0.5*(F(OFF_R1)+F(OFF_R2))",
+    "capture_source": "exact_K8_candidate_sets_from_bound_Step3_audit",
+    "generation": "forbidden",
+    "encoding": "forbidden",
+    "training": "forbidden"
+  },
+  "separation": {
+    "capture_is_frozen_before_calibration": true,
+    "capture_candidate_budget_K": 8,
+    "capture_set_identity": "canonical_SHA256_of_ordered_candidate_identity_and_residual_records",
+    "calibration_may_reorder_or_expand_capture": false,
+    "truth_available_to_fit_or_ranking": false,
+    "truth_audit_occurs_after_ranking": true,
+    "all_captured_candidates_are_independently_calibrated": true
+  },
+  "calibration": {
+    "implementation": "sc_sstw_feasibility.calibration.calibrate_from_pilot_pairs_plus_equalize_observations",
+    "fit_model": "observation_30D_equals_matrix_30x2_times_candidate_template_q_plus_bias_30",
+    "fit_indices": [0, 1, 2, 3],
+    "held_out_indices": [4, 5],
+    "minimum_fit_samples": 4,
+    "fit_parameter_dimension": 90,
+    "least_squares_regularization": null,
+    "equalization_ridge": 0.0001,
+    "score": "mean_squared_error_over_held_out_2_points_times_2_coordinates",
+    "score_scalar_count": 4,
+    "acceptance_threshold": null,
+    "candidate_sharing": "none"
+  },
+  "selection": {
+    "K2": 1,
+    "K2_prior": "existing_downstream_calibration_requires_one_frozen_accepted_candidate",
+    "winner_rule": "strictly_lower_held_out_MSE_than_runner_up",
+    "score_tie": "cell_failure",
+    "serialization_tie_order": ["capture_residual", "start_index", "template_A_before_B"],
+    "truth": "own_template_start0",
+    "all_pass": "every_group_times_condition_times_Step3_perturbation_has_unique_truth_winner"
+  },
+  "time_perturbations": [
+    {
+      "id": "identity",
+      "truth_mapping": "own_template_start0"
+    },
+    {
+      "id": "private_tail_delete6_duplicate12",
+      "truth_mapping": "own_template_start0",
+      "reason": "original_indices0_through5_are_unchanged"
+    }
+  ],
+  "outcomes": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"],
+  "feasible_route": "PROCEED_STEP5_PHASE_RECOVERY_CPU",
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
