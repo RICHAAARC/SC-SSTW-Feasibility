@@ -913,7 +913,11 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     notebook = json.loads(raw)
     source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
     execution_source = "".join(notebook["cells"][2]["source"])
-    assert "AUTHORIZED_REF = ''" in source
+    assert "REPOSITORY_URL = 'https://github.com/RICHAAARC/SC-SSTW-Feasibility.git'" in source
+    assert "AUTHORIZED_REF = '54ef62c22489796f0467c45cc07edfc338cc322f'" in source
+    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility'" in source
+    assert "AUTHORIZE_EXECUTION = True" in source
+    assert "AUTHORIZE_DRIVE_IO = True" in source
     assert "'--generate'" in source
     assert "'--diagnostic-bootstrap'" in source
     assert "MANIFEST_PATH" not in source
