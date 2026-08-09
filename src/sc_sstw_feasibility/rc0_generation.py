@@ -293,6 +293,20 @@ def _prepare_initial_latent(pipe: Any, torch: Any, parameters: Mapping[str, Any]
     return latent
 
 
+def _load_production_pipeline(wan_pipeline: Any, torch: Any, resolved_snapshot: Path) -> Any:
+    """Load the exact local Wan snapshot with the single frozen offload policy."""
+
+    pipe = wan_pipeline.from_pretrained(
+        str(resolved_snapshot),
+        torch_dtype=torch.bfloat16,
+        local_files_only=True,
+    )
+    pipe.enable_model_cpu_offload()
+    if not str(pipe._execution_device).startswith("cuda"):
+        raise RC0GenerationError("Wan CPU offload did not retain a CUDA execution device")
+    return pipe
+
+
 def construct_final_latent_relation_residual(
     final_latent: Any,
     schedule: Sequence[Sequence[float]],
@@ -518,11 +532,7 @@ def _run_generation_control_flow(
             or resolved_snapshot.name != frozen_revision
         ):
             raise RC0GenerationError("local model snapshot differs from the frozen revision")
-        pipe = WanPipeline.from_pretrained(
-            str(resolved_snapshot),
-            torch_dtype=torch.bfloat16,
-            local_files_only=True,
-        ).to("cuda")
+        pipe = _load_production_pipeline(WanPipeline, torch, resolved_snapshot)
         observed_revision = frozen_revision
         scheduler = {
             "class": type(pipe.scheduler).__name__,

@@ -33,6 +33,7 @@ from src.sc_sstw_feasibility.rc0_causal_localization_v2 import (
 )
 from src.sc_sstw_feasibility.rc0_generation import (
     GenerationReceipt,
+    _load_production_pipeline,
     construct_final_latent_relation_residual,
     consume_generation_receipt,
     run_rc0_generation,
@@ -920,7 +921,15 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     raw = (ROOT / NOTEBOOK_PATH).read_text()
     notebook = json.loads(raw)
     source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
-    execution_source = "".join(notebook["cells"][2]["source"])
+    code_cells = [cell for cell in notebook["cells"] if cell.get("cell_type") == "code"]
+    assert code_cells[0]["source"] == [
+        "from google.colab import drive\n",
+        "drive.mount('/content/drive')\n",
+    ]
+    execution_source = "".join(code_cells[2]["source"])
+    assert source.count("from google.colab import drive") == 1
+    assert source.count("drive.mount('/content/drive')") == 1
+    assert source.index("drive.mount('/content/drive')") < source.index("REPOSITORY_URL =")
     repository_match = re.search(r"^REPOSITORY_URL = '([^']*)'$", source, re.MULTILINE)
     ref_match = re.search(r"^AUTHORIZED_REF = '([^']*)'", source, re.MULTILINE)
     assert repository_match is not None and repository_match.group(1) in {"", "https://github.com/RICHAAARC/SC-SSTW-Feasibility.git"}
@@ -928,7 +937,7 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     execution_enabled = "AUTHORIZE_EXECUTION = True" in source
     drive_enabled = "AUTHORIZE_DRIVE_IO = True" in source
     assert execution_enabled is drive_enabled
-    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility/rc0-diag-vae-latent'" in source
+    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility/rc0-diag-vae-latent-oom-repair'" in source
     assert "'--generate'" in source
     assert "'--diagnostic-bootstrap'" in source
     assert "MANIFEST_PATH" not in source
@@ -960,8 +969,8 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     assert "_require_absent([DRIVE_ARCHIVE, DRIVE_SIDECAR])" in execution_source
     assert "Path('/content/drive') not in drive_root.parents" in execution_source
     assert execution_source.count("completed = subprocess.run(argv") == 1
-    assert execution_source.index("try:\n") < execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT:' + AUTHORIZED_REF)")
-    assert execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT:' + AUTHORIZED_REF)") < execution_source.index("git', 'clone'")
+    assert execution_source.index("try:\n") < execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-OOM-REPAIR:' + AUTHORIZED_REF)")
+    assert execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-OOM-REPAIR:' + AUTHORIZED_REF)") < execution_source.index("git', 'clone'")
     assert execution_source.index("git', 'clone'") < execution_source.index("snapshot_download(")
     assert "'diagnostic_class': DIAGNOSTIC_CLASS" in execution_source
     assert "'authorization_claimed': False" in execution_source
@@ -981,7 +990,7 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     assert "downloaded model snapshot commit identity mismatch" in execution_source
     assert "token=" not in execution_source and "revision='main'" not in execution_source and "revision=\"main\"" not in execution_source
     assert execution_source.index("snapshot_path.resolve(strict=True)") < execution_source.index("completed = subprocess.run(argv")
-    assert execution_source.index("drive.mount('/content/drive')") < execution_source.index("completed = subprocess.run(argv")
+    assert source.index("drive.mount('/content/drive')") < source.index("completed = subprocess.run(argv")
     assert execution_source.index("audit = json.loads") < execution_source.index("expected_exit =")
     archive_call = execution_source.index("        _zip_tree_exclusive(ARCHIVE_ROOT, ARCHIVE)")
     archive_test = execution_source.index("        with zipfile.ZipFile(ARCHIVE) as handle:", archive_call)
@@ -997,7 +1006,8 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
 
 def test_notebook_no_clobber_helpers_and_actual_package_boundary(tmp_path: Path) -> None:
     notebook = json.loads((ROOT / NOTEBOOK_PATH).read_text())
-    execution_source = "".join(notebook["cells"][2]["source"])
+    code_cells = [cell for cell in notebook["cells"] if cell.get("cell_type") == "code"]
+    execution_source = "".join(code_cells[2]["source"])
     tree = ast.parse(execution_source)
     helper_nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     namespace = {"Path": Path, "os": os, "shutil": shutil, "stat": stat, "zipfile": zipfile}
@@ -1130,10 +1140,49 @@ def test_diag_fast_exact8_and_frozen_carrier_sanity() -> None:
     assert "snapshot_download(" in generation_source
     assert "revision=frozen_revision" in generation_source
     assert "local_files_only=True" in generation_source
-    assert "WanPipeline.from_pretrained(\n            str(resolved_snapshot)" in generation_source
+    assert "_load_production_pipeline(WanPipeline, torch, resolved_snapshot)" in generation_source
+    assert "wan_pipeline.from_pretrained(" in generation_source
     assert "_commit_hash" not in generation_source
     runner_source = (ROOT / RUNNER_PATH).read_text()
     assert runner_source.count("traceback.print_exception(error, file=sys.stderr)") == 2
+
+
+def test_production_pipeline_uses_single_cpu_offload_policy() -> None:
+    class FakePipe:
+        def __init__(self) -> None:
+            self.offload_enabled = False
+
+        def enable_model_cpu_offload(self) -> None:
+            self.offload_enabled = True
+
+        @property
+        def _execution_device(self) -> str:
+            assert self.offload_enabled
+            return "cuda:0"
+
+    class FakeWanPipeline:
+        call: tuple[str, object, bool] | None = None
+
+        @classmethod
+        def from_pretrained(cls, path: str, *, torch_dtype: object, local_files_only: bool) -> FakePipe:
+            cls.call = (path, torch_dtype, local_files_only)
+            return FakePipe()
+
+    class FakeTorch:
+        bfloat16 = object()
+
+    snapshot = Path("/tmp/frozen-wan-snapshot")
+    pipe = _load_production_pipeline(FakeWanPipeline, FakeTorch, snapshot)
+    assert pipe.offload_enabled is True
+    assert FakeWanPipeline.call == (str(snapshot), FakeTorch.bfloat16, True)
+    generation_source = (ROOT / "src/sc_sstw_feasibility/rc0_generation.py").read_text()
+    assert "pipe.enable_model_cpu_offload()" in generation_source
+    assert '.to("cuda")' not in generation_source and ".to('cuda')" not in generation_source
+    assert "pipe._execution_device" in generation_source
+    assert 'output_type="latent"' in generation_source
+    assert "construct_final_latent_relation_residual(final_latent, schedule, carrier)" in generation_source
+    assert "_decode_final_wan_latent(pipe, torch, final_latent)" in generation_source
+    assert "pipe.vae.decode(" in generation_source
 
 
 @pytest.mark.parametrize("schedule", [schedule_a(), schedule_b()])
