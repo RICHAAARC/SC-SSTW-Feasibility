@@ -96,7 +96,13 @@
     "rc1_config_raw_sha256": "8accea693798e2dd2ad4451ea14df71651116b89e3d8707cfe344886a57bcf15",
     "rc1_plan_raw_sha256": "d5396107f00e68eba8f972a08996608421f02a4c205339a34b3616636e41a8c7",
     "rc1_protocol_raw_sha256": "ccac64d53c1a9b87bfdab8316e963ed5bdfe415e5d95fdc553e3ae8f09438b2a",
-    "g0_config_raw_sha256": "4584ed9d016ddf98c9a01408622b284b6e87724f33f1452b7cc7412ee1b88007"
+    "g0_config_raw_sha256": "4584ed9d016ddf98c9a01408622b284b6e87724f33f1452b7cc7412ee1b88007",
+    "extractor_source_commit": "fe8bc36461fdf40db917a3772a30ce6969a6c3a8",
+    "extractor_source_tree": "90e50f107685c768600686239c922242e660d20a",
+    "extractor_source_path": "src/sc_sstw_feasibility/learned_observation.py",
+    "extractor_symbol": "extract_feature_matrix",
+    "extractor_git_blob": "6288d954a1bdaded5fd2f92ed78b463bc11a6a18",
+    "extractor_raw_sha256": "9c7fd37995d49344c2200a4855eaf6a547ea27336fdfe4fc652c62ac327b9866"
   },
   "formal_result": false,
   "stage_progression_allowed": false

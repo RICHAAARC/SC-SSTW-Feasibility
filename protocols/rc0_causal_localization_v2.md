@@ -245,6 +245,34 @@ decode failure, or feature-extractor identity mismatch. A partial group never
 enters Level P. Level R must be unreachable unless Level P has four passing
 cells.
 
+The config and plan are closed schemas, not extensible request objects. Future
+consumers must recursively require every object to have the exact frozen keys
+in the frozen order, every array to have the exact length/order, and every
+scalar to have its exact JSON type and value. Unknown, missing, renamed, or
+reordered fields are invalid. In particular, JSON booleans are not integers;
+numeric/string/object/array/null substitutions fail even when Python equality
+would otherwise compare them as equal. Threshold, candidate, schedule, retry,
+claim, or extra-input fields cannot be injected.
+
+State classification validates its complete cell schema before evidence
+sufficiency. P and R cell maps contain exactly the four frozen group/condition
+keys and literal Boolean values. `r_was_executed=false` requires no R map;
+`r_was_executed=true` requires a complete R map. Running R after any P-cell
+failure is invalid. Only after these checks may an excessive OFF repeat floor
+produce `INSUFFICIENT_EVIDENCE`.
+
+The frozen 30D extractor identity is more than a symbol name. It is
+`extract_feature_matrix` in
+`src/sc_sstw_feasibility/learned_observation.py`, bound at source commit
+`fe8bc36461fdf40db917a3772a30ce6969a6c3a8`, tree
+`90e50f107685c768600686239c922242e660d20a`, Git blob
+`6288d954a1bdaded5fd2f92ed78b463bc11a6a18`, and raw SHA-256
+`9c7fd37995d49344c2200a4855eaf6a547ea27336fdfe4fc652c62ac327b9866`.
+The file contains the extractor and its frame-group/DCT definitions, so it is
+the minimal source closure. A future implementation must verify all of these
+identities before extracting features; matching only the import path or symbol
+is insufficient.
+
 The minimal future implementation should reuse the independently reviewed
 GenerationReceipt same-process control-flow boundary, same-latent records,
 saved-MP4 decode/cache cross-check, and fail-closed package infrastructure.
