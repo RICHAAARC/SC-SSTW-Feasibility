@@ -9,6 +9,7 @@ import subprocess
 import numpy as np
 import pytest
 
+import sc_sstw_feasibility.rc0_causal_localization_v2 as rc0_module
 from sc_sstw_feasibility.rc0_causal_localization_v2 import (
     ALLOWED_STATES,
     ATTEMPT_ORDER,
@@ -523,6 +524,126 @@ def test_plan_nested_exact_json_types() -> None:
     changed_plan["retry_policy"] = "retry_once"
     with pytest.raises(ProtocolViolation):
         validate_plan(changed_plan)
+
+
+def test_mutable_authority_exports_and_factories_are_absent() -> None:
+    forbidden_names = (
+        "FROZEN_CONFIG",
+        "FROZEN_PLAN",
+        "_close_validator_authority",
+        "_require_exact_json",
+        "authority",
+        "canonical_config",
+        "canonical_plan",
+        "factory",
+        "binder",
+        "from_snapshot",
+        "from_mapping",
+    )
+    names = set(dir(rc0_module))
+    for name in forbidden_names:
+        assert name not in names
+        with pytest.raises(AttributeError):
+            getattr(rc0_module, name)
+    with pytest.raises(ImportError):
+        exec("from sc_sstw_feasibility.rc0_causal_localization_v2 import FROZEN_CONFIG", {})
+    with pytest.raises(ImportError):
+        exec("from sc_sstw_feasibility.rc0_causal_localization_v2 import FROZEN_PLAN", {})
+
+
+def test_original_audit_mutable_authority_poc_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    valid_config = _load(CONFIG_PATH)
+    valid_plan = _load(PLAN_PATH)
+    fake_config_authority = copy.deepcopy(valid_config)
+    fake_plan_authority = copy.deepcopy(valid_plan)
+    fake_config_authority["attempt_budget"] = 9
+    fake_plan_authority["retry_policy"] = "retry_allowed"
+    monkeypatch.setattr(rc0_module, "FROZEN_CONFIG", fake_config_authority, raising=False)
+    monkeypatch.setattr(rc0_module, "FROZEN_PLAN", fake_plan_authority, raising=False)
+    monkeypatch.setattr(rc0_module, "canonical_config", json.dumps(fake_config_authority), raising=False)
+    monkeypatch.setattr(rc0_module, "canonical_plan", json.dumps(fake_plan_authority), raising=False)
+
+    with pytest.raises(ProtocolViolation):
+        validate_config(fake_config_authority)
+    with pytest.raises(ProtocolViolation):
+        validate_plan(fake_plan_authority)
+    validate_config(valid_config)
+    validate_plan(valid_plan)
+
+
+def test_module_rebinding_and_mutated_copies_cannot_change_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    valid_config = _load(CONFIG_PATH)
+    valid_plan = _load(PLAN_PATH)
+    for name, value in (
+        ("PROTOCOL_ID", "attacker_protocol"),
+        ("RELATION_MAX_RESIDUAL", 9.0),
+        ("ATTEMPT_ORDER", (("attacker", "retry"),)),
+        ("authority", {"attempt_budget": 9}),
+        ("factory", lambda value: value),
+        ("binder", object()),
+    ):
+        monkeypatch.setattr(rc0_module, name, value, raising=False)
+    validate_config(valid_config)
+    validate_plan(valid_plan)
+
+    config_mutations = (
+        lambda value: value.__setitem__("attempt_budget", 9),
+        lambda value: value["level_p"].__setitem__("absolute_effect_min", 0.0),
+        lambda value: value["schedule"]["B_swapped_indices"].reverse(),
+        lambda value: value["source_guards"].__setitem__("extractor_git_blob", "0" * 40),
+    )
+    for mutate in config_mutations:
+        changed = copy.deepcopy(valid_config)
+        mutate(changed)
+        with pytest.raises(ProtocolViolation):
+            validate_config(changed)
+        validate_config(valid_config)
+
+    plan_mutations = (
+        lambda value: value.__setitem__("retry_policy", "retry_allowed"),
+        lambda value: value["groups"][0].__setitem__("seed", 999),
+        lambda value: value["attempts"][0].__setitem__("condition", "A"),
+        lambda value: value["matched_fields"].remove("actual_initial_latent_sha256"),
+    )
+    for mutate in plan_mutations:
+        changed = copy.deepcopy(valid_plan)
+        mutate(changed)
+        with pytest.raises(ProtocolViolation):
+            validate_plan(changed)
+        validate_plan(valid_plan)
+
+
+def test_copy_deepcopy_json_roundtrip_and_interleaved_calls_do_not_pollute_authority() -> None:
+    valid_config = _load(CONFIG_PATH)
+    valid_plan = _load(PLAN_PATH)
+    for index in range(4):
+        validate_config(valid_config)
+        validate_plan(valid_plan)
+
+        config_copy = copy.copy(valid_config) if index % 2 == 0 else copy.deepcopy(valid_config)
+        config_copy = json.loads(json.dumps(config_copy))
+        config_copy["carrier"]["block_index"] = 30
+        with pytest.raises(ProtocolViolation):
+            validate_config(config_copy)
+
+        plan_copy = copy.copy(valid_plan) if index % 2 == 0 else copy.deepcopy(valid_plan)
+        plan_copy = json.loads(json.dumps(plan_copy))
+        plan_copy["attempts"].append({"attempt_index": 9, "group_id": "orbital_glass", "condition": "A"})
+        with pytest.raises(ProtocolViolation):
+            validate_plan(plan_copy)
+
+        validate_plan(valid_plan)
+        validate_config(valid_config)
+
+
+def test_protocol_declares_limited_non_attestation_threat_boundary() -> None:
+    protocol = PROTOCOL_PATH.read_text(encoding="utf-8")
+    assert "ordinary imports" in protocol
+    assert "explicit closure/cell or function-internals" in protocol
+    assert "validator monkeypatching" in protocol
+    assert "does not attempt to resist arbitrary code execution" in protocol
+    assert "makes no claim of cryptographic" in protocol
+    assert "remote proof" in protocol
 
 
 def test_protocol_boundary_is_nonformal_and_formula_module_has_no_execution_io() -> None:

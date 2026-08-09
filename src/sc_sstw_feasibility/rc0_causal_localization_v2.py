@@ -7,6 +7,7 @@ priority executable on synthetic in-memory arrays.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any, Mapping, Sequence
 
@@ -246,27 +247,6 @@ class ProtocolViolation(ValueError):
     """A fail-closed protocol or formula input violation."""
 
 
-def _require_exact_json(actual: Any, expected: Any, path: str) -> None:
-    """Require exact JSON shape, order, scalar type, and frozen value."""
-
-    if type(actual) is not type(expected):
-        raise ProtocolViolation(f"{path} JSON type changed")
-    if type(expected) is dict:
-        if tuple(actual) != tuple(expected):
-            raise ProtocolViolation(f"{path} keys or key order changed")
-        for key in expected:
-            _require_exact_json(actual[key], expected[key], f"{path}.{key}")
-        return
-    if type(expected) is list:
-        if len(actual) != len(expected):
-            raise ProtocolViolation(f"{path} list length changed")
-        for index, (actual_item, expected_item) in enumerate(zip(actual, expected, strict=True)):
-            _require_exact_json(actual_item, expected_item, f"{path}[{index}]")
-        return
-    if actual != expected:
-        raise ProtocolViolation(f"{path} frozen value changed")
-
-
 def schedule_a() -> tuple[tuple[float, float], ...]:
     """Read schedule A from the existing frozen burst-alpha source."""
 
@@ -484,13 +464,47 @@ def terminal_state(
     return STATUS_P_PASS_R_PASS
 
 
-def validate_config(config: Mapping[str, Any]) -> None:
-    """Reject any config key, order, JSON type, or frozen-value drift."""
+def _close_validator_authority():
+    """Seal mutable construction objects into closure-local canonical strings."""
 
-    _require_exact_json(config, FROZEN_CONFIG, "config")
+    dumps = json.dumps
+    loads = json.loads
+    violation_type = ProtocolViolation
+    config_canonical = dumps(FROZEN_CONFIG, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    plan_canonical = dumps(FROZEN_PLAN, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+
+    def require_exact_json(actual: Any, expected: Any, path: str) -> None:
+        if type(actual) is not type(expected):
+            raise violation_type(f"{path} JSON type changed")
+        if type(expected) is dict:
+            if tuple(actual) != tuple(expected):
+                raise violation_type(f"{path} keys or key order changed")
+            for key in expected:
+                require_exact_json(actual[key], expected[key], f"{path}.{key}")
+            return
+        if type(expected) is list:
+            if len(actual) != len(expected):
+                raise violation_type(f"{path} list length changed")
+            for index, (actual_item, expected_item) in enumerate(zip(actual, expected, strict=True)):
+                require_exact_json(actual_item, expected_item, f"{path}[{index}]")
+            return
+        if actual != expected:
+            raise violation_type(f"{path} frozen value changed")
+
+    def validate_config(config: Mapping[str, Any]) -> None:
+        """Validate against a fresh expected object from sealed config bytes."""
+
+        require_exact_json(config, loads(config_canonical), "config")
+
+    def validate_plan(plan: Mapping[str, Any]) -> None:
+        """Validate against a fresh expected object from sealed plan bytes."""
+
+        require_exact_json(plan, loads(plan_canonical), "plan")
+
+    return validate_config, validate_plan
 
 
-def validate_plan(plan: Mapping[str, Any]) -> None:
-    """Reject any plan key, order, JSON type, or frozen-value drift."""
-
-    _require_exact_json(plan, FROZEN_PLAN, "plan")
+validate_config, validate_plan = _close_validator_authority()
+del _close_validator_authority
+del FROZEN_CONFIG
+del FROZEN_PLAN

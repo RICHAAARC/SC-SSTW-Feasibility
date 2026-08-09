@@ -254,6 +254,24 @@ numeric/string/object/array/null substitutions fail even when Python equality
 would otherwise compare them as equal. Threshold, candidate, schedule, retry,
 claim, or extra-input fields cannot be injected.
 
+The validator's authority is sealed at module initialization as closure-local
+canonical JSON strings. The mutable construction objects and one-time factory
+are then removed from the module namespace. Every validation call decodes a
+fresh internal expected object and compares against it; neither caller input,
+disk files, environment variables, nor writable module attributes supply the
+expected truth. There is no public expected-object setter, binder, factory,
+mapping constructor, or mutable `FROZEN_CONFIG`/`FROZEN_PLAN` export.
+
+This authority boundary is deliberately limited. It covers ordinary imports,
+module attribute access and rebinding, in-place mutation of caller copies,
+copy/deepcopy and JSON-roundtrip copies, and repeated or interleaved validator
+calls. It does not attempt to resist arbitrary code execution already inside
+the same Python process, explicit closure/cell or function-internals
+reflection, validator monkeypatching, debugger injection, or direct memory
+modification. Resisting those would require a separately authorized process or
+external trust boundary. This protocol makes no claim of cryptographic
+immutability, attestation, hardware origin, or remote proof.
+
 State classification validates its complete cell schema before evidence
 sufficiency. P and R cell maps contain exactly the four frozen group/condition
 keys and literal Boolean values. `r_was_executed=false` requires no R map;
