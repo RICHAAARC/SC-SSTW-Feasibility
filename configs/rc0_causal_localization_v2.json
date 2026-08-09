@@ -1,0 +1,103 @@
+{
+  "schema": "sc_sstw_rc0_causal_localization_config_v2",
+  "protocol_id": "sc_sstw_rc0_causal_localization_v2",
+  "evidence_class": "protocol_design_and_synthetic_formula_preflight_only",
+  "question_order": ["H_P_saved_mp4_pixel_bridge", "H_R_paired_public_relation"],
+  "state_machine": ["integrity_and_evidence_sufficiency", "level_p_all_four_cells", "level_r_only_after_level_p_all_pass", "terminal_state"],
+  "condition_order": ["OFF_R1", "OFF_R2", "A", "B"],
+  "attempt_budget": 8,
+  "start_indices": [0, 1, 2, 3, 4, 5, 6, 7],
+  "schedule": {
+    "A_source_module": "sc_sstw_feasibility.learned_observation_l1_v2",
+    "A_source_symbol": "TEMPORAL_POINTS",
+    "B_derivation": "schedule_A_with_indices_4_and_5_swapped",
+    "B_swapped_indices": [4, 5],
+    "cross_residual_expected": 0.761311945935564,
+    "cross_residual_absolute_tolerance": 1e-09
+  },
+  "carrier": {
+    "kind": "dit_internal_self_attention_output_residual",
+    "module_path": "transformer.blocks[29].attn1",
+    "block_index": 29,
+    "target_relative_rms": 0.03,
+    "target_relative_rms_absolute_tolerance": 0.00005,
+    "apply_to": "8_steps_each_cond_then_uncond_16_calls"
+  },
+  "model": {
+    "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"
+  },
+  "generation": {
+    "scheduler": "WanPipeline_frozen_default_for_revision",
+    "sampler": "WanPipeline_frozen_default_for_revision",
+    "inference_steps": 8,
+    "guidance_scale": 5.0,
+    "height": 320,
+    "width": 512,
+    "frame_count": 49,
+    "fps": 8,
+    "dtype": "torch.bfloat16",
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple scenes, flicker"
+  },
+  "encoding": {
+    "call": "diffusers.utils.export_to_video",
+    "container": "mp4",
+    "codec": "h264",
+    "pixel_format": "yuv420p",
+    "quality": 5.0,
+    "bitrate": null,
+    "macro_block_size": 16,
+    "fallback_permitted": false
+  },
+  "decode": {
+    "source": "saved_mp4_only",
+    "decoder": "ffmpeg_rgb24_reference_path",
+    "frame_order": "decoded_presentation_order_indices_0_through_48",
+    "color_space": "ffmpeg_rgb24_srgb_nonlinear",
+    "integer_range": [0, 255],
+    "channel_order": "RGB",
+    "resize_policy": "forbidden",
+    "alignment_policy": "index_identity_only_no_search",
+    "required_geometry": [49, 320, 512, 3]
+  },
+  "level_p": {
+    "metric": "normalized_decoded_rgb_rms",
+    "off_reference": "per_pixel_elementwise_mean_OFF_R1_OFF_R2",
+    "off_floor": "half_normalized_rgb_rms_OFF_R1_minus_OFF_R2",
+    "per_frame_formula": "sqrt_mean_H_W_RGB_squared_difference",
+    "video_aggregation": "sqrt_mean_49_frames_of_squared_per_frame_rms",
+    "epsilon": 1e-12,
+    "absolute_effect_min": 0.00784313725490196,
+    "off_repeat_floor_max": 0.00392156862745098,
+    "relative_floor_multiplier": 3.0
+  },
+  "level_r": {
+    "feature_shape": [13, 30],
+    "off_reference": "elementwise_mean_OFF_R1_OFF_R2",
+    "readout": "fixed_affine_relation_projection_no_training",
+    "feature_norm_epsilon": 1e-12,
+    "feature_noise_multiplier": 3.0,
+    "relation_denominator_epsilon": 1e-09,
+    "maximum_relation_residual": 0.25,
+    "templates": ["A", "B"],
+    "start_indices": [0, 1, 2, 3, 4, 5, 6, 7]
+  },
+  "states": {
+    "p_fail": "P_FAIL_CURRENT_CARRIER_STOP",
+    "p_pass_r_fail": "P_PASS_R_FAIL_READOUT_SWITCH_REQUIRED",
+    "p_pass_r_pass": "P_PASS_R_PASS_PAIRED_RELATION_PRESENT",
+    "invalid": "INVALID_EXPERIMENT",
+    "insufficient": "INSUFFICIENT_EVIDENCE"
+  },
+  "state_priority": ["INVALID_EXPERIMENT", "INSUFFICIENT_EVIDENCE", "P_FAIL_CURRENT_CARRIER_STOP", "P_PASS_R_FAIL_READOUT_SWITCH_REQUIRED", "P_PASS_R_PASS_PAIRED_RELATION_PRESENT"],
+  "source_guards": {
+    "baseline_commit": "51b4d4d1e5c0a52139b3f8a61748decff6d52931",
+    "baseline_tree": "60426085872a2a3dbb82d2ec53962b1d3adb9dda",
+    "rc1_config_raw_sha256": "8accea693798e2dd2ad4451ea14df71651116b89e3d8707cfe344886a57bcf15",
+    "rc1_plan_raw_sha256": "d5396107f00e68eba8f972a08996608421f02a4c205339a34b3616636e41a8c7",
+    "rc1_protocol_raw_sha256": "ccac64d53c1a9b87bfdab8316e963ed5bdfe415e5d95fdc553e3ae8f09438b2a",
+    "g0_config_raw_sha256": "4584ed9d016ddf98c9a01408622b284b6e87724f33f1452b7cc7412ee1b88007"
+  },
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
