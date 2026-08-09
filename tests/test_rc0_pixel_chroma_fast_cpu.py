@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import math
 from pathlib import Path
 
@@ -10,14 +11,17 @@ from src.sc_sstw_feasibility.learned_observation import decode_saved_mp4
 from src.sc_sstw_feasibility.rc0_causal_localization_v2 import schedule_a, schedule_b
 from src.sc_sstw_feasibility.rc0_pixel_chroma_fast_cpu import (
     ATTEMPT_ORDER,
+    BOUND_GENERATED_ARTIFACTS,
     CONDITION_ORDER,
     FRAME_POINT_INDICES,
     GROUP_ORDER,
     TARGET_RMS,
     VIDEO_SHAPE,
     apply_carrier,
+    compare_with_independent_recompute,
     construct_unit_residual,
     encode_mp4,
+    evaluate_existing_run_once,
     load_and_validate_config,
     probe_mp4,
 )
@@ -110,3 +114,53 @@ def test_protocol_freezes_p_short_circuit_and_routes() -> None:
     assert "STEP3_AISB_CPU" in protocol
     assert "KEEP_CARRIER_SWITCH_TO_VAE_READOUT" in protocol
     assert "no retry" in protocol.lower()
+
+
+def test_generation_path_registration_bug_is_closed() -> None:
+    source = inspect.getsource(__import__(
+        "src.sc_sstw_feasibility.rc0_pixel_chroma_fast_cpu",
+        fromlist=["run_once"],
+    ).run_once)
+    assert "video_paths[group][condition] = path" in source
+    assert source.index("video_paths[group][condition] = path") < source.index("evaluation = evaluate_saved_videos(video_paths)")
+
+
+def test_evaluation_only_binds_all_eight_artifact_hashes() -> None:
+    assert tuple(BOUND_GENERATED_ARTIFACTS) == GROUP_ORDER
+    assert sum(len(group) for group in BOUND_GENERATED_ARTIFACTS.values()) == 8
+    for group in GROUP_ORDER:
+        assert tuple(BOUND_GENERATED_ARTIFACTS[group]) == CONDITION_ORDER
+        for condition, (path, digest) in BOUND_GENERATED_ARTIFACTS[group].items():
+            assert path.is_absolute()
+            assert f"/{group}/{condition}/saved.mp4" in str(path)
+            assert len(digest) == 64
+
+
+def test_evaluation_only_has_no_encode_or_generation_path() -> None:
+    source = inspect.getsource(evaluate_existing_run_once)
+    assert "evaluate_saved_videos(video_paths)" in source
+    assert "encode_mp4" not in source
+    assert "apply_carrier" not in source
+    assert "validate_source_zip" not in source
+    cli = (ROOT / "experiments/evaluate_rc0_pixel_chroma_run1.py").read_text(encoding="utf-8")
+    assert "argparse" not in cli
+    assert "add_argument" not in cli
+    assert "response = run_once(" not in cli
+
+
+def test_independent_comparison_is_exact_and_detects_drift() -> None:
+    independent = json.loads(Path(
+        "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-pixel-chroma-fast-cpu-9e19d31-run1/independent_recompute.json"
+    ).read_text(encoding="utf-8"))
+    evaluation = {
+        key: independent[key]
+        for key in ("step1", "step2", "route", "next_question", "p_cells", "r_executed", "r_cells")
+    }
+    matched = compare_with_independent_recompute(evaluation, independent)
+    assert matched["all_compared_values_match"] is True
+    assert matched["maximum_absolute_numeric_difference"] == 0.0
+    changed = json.loads(json.dumps(evaluation))
+    changed["p_cells"]["orbital_glass:A"]["effect"] += 1e-8
+    rejected = compare_with_independent_recompute(changed, independent)
+    assert rejected["all_compared_values_match"] is False
+    assert rejected["mismatch_paths"] == ["evaluation.p_cells.orbital_glass:A.effect"]

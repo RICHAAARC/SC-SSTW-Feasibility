@@ -43,6 +43,28 @@ SOURCE_MEMBERS = {
         "sha256": "1f99673db08015a5afcf26c985d5c8d84601735b7c14f9b1ca40ff549ba2a276",
     },
 }
+GENERATION_IMPLEMENTATION_COMMIT = "9e19d31d8e1a4f6398e991e16bd1fcf42908912a"
+GENERATION_IMPLEMENTATION_TREE = "fa67d14deb83b2d2cc725ae95c56ffcbcc6bfabc"
+FROZEN_CONFIG_SHA256 = "d2f8b4d13e7f1b3051f4b4e46ac879eb55f817378d24f59b8e2700a44d47e171"
+FROZEN_PROTOCOL_SHA256 = "43321e09086b9be92c0d45327bb209d2d0692b82545a75a0e826c4a3136f657b"
+GENERATED_RUN_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-pixel-chroma-fast-cpu-9e19d31-run1")
+EVALUATION_ONLY_OUTPUT = GENERATED_RUN_ROOT / "evaluation-only-result"
+INDEPENDENT_RECOMPUTE_PATH = GENERATED_RUN_ROOT / "independent_recompute.json"
+INDEPENDENT_RECOMPUTE_SHA256 = "49de16e2c4d3ab93f31c9fa95656c27265e18f22f118f87f9d37b26f733ab61b"
+BOUND_GENERATED_ARTIFACTS = {
+    "orbital_glass": {
+        "OFF_R1": (GENERATED_RUN_ROOT / "output/videos/orbital_glass/OFF_R1/saved.mp4", "1459ce027d94e1446883cebad82eaad6cc3f004be56601fe4dcd6e4149d82a57"),
+        "OFF_R2": (GENERATED_RUN_ROOT / "output/videos/orbital_glass/OFF_R2/saved.mp4", "1459ce027d94e1446883cebad82eaad6cc3f004be56601fe4dcd6e4149d82a57"),
+        "A": (GENERATED_RUN_ROOT / "output/videos/orbital_glass/A/saved.mp4", "a0c8f23d86923a375da0d5fd9740c74ed0bb24642653cc3b51abf3004cb90e98"),
+        "B": (GENERATED_RUN_ROOT / "output/videos/orbital_glass/B/saved.mp4", "2c9f5813c34729f18b2b81d0f7de694120a13afae0a172ee9336cd0824f281da"),
+    },
+    "articulated_paper": {
+        "OFF_R1": (GENERATED_RUN_ROOT / "output/videos/articulated_paper/OFF_R1/saved.mp4", "1e9e210f3afda91fe592e61dcb5f1e01167facef13edbd244610b9c8693b3ba9"),
+        "OFF_R2": (GENERATED_RUN_ROOT / "output/videos/articulated_paper/OFF_R2/saved.mp4", "1e9e210f3afda91fe592e61dcb5f1e01167facef13edbd244610b9c8693b3ba9"),
+        "A": (GENERATED_RUN_ROOT / "output/videos/articulated_paper/A/saved.mp4", "a9f62f7c5ca0aa762f164a599aac763b46e8a2b143085b0c1cfbaffd1ca4cd30"),
+        "B": (GENERATED_RUN_ROOT / "output/videos/articulated_paper/B/saved.mp4", "caa2138ca9e45742e776cba7eb1a4dbdd0c314e96fcd2187d1a5f57b7b097b9c"),
+    },
+}
 
 
 class DiagnosticError(RuntimeError):
@@ -300,6 +322,155 @@ def evaluate_saved_videos(video_paths: Mapping[str, Mapping[str, Path]]) -> dict
     }
 
 
+def _compare_recursive(actual: Any, expected: Any, path: str = "evaluation") -> tuple[float, list[str]]:
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return (0.0, []) if type(actual) is type(expected) and actual == expected else (math.inf, [path])
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        difference = abs(float(actual) - float(expected))
+        return difference, [] if difference <= 1e-12 else [path]
+    if type(actual) is not type(expected):
+        return math.inf, [path]
+    if isinstance(expected, dict):
+        if set(actual) != set(expected):
+            return math.inf, [f"{path}.keys"]
+        maximum = 0.0
+        mismatches: list[str] = []
+        for key in expected:
+            difference, nested = _compare_recursive(actual[key], expected[key], f"{path}.{key}")
+            maximum = max(maximum, difference)
+            mismatches.extend(nested)
+        return maximum, mismatches
+    if isinstance(expected, list):
+        if len(actual) != len(expected):
+            return math.inf, [f"{path}.length"]
+        maximum = 0.0
+        mismatches: list[str] = []
+        for index, expected_item in enumerate(expected):
+            difference, nested = _compare_recursive(actual[index], expected_item, f"{path}[{index}]")
+            maximum = max(maximum, difference)
+            mismatches.extend(nested)
+        return maximum, mismatches
+    return (0.0, []) if actual == expected else (math.inf, [path])
+
+
+def compare_with_independent_recompute(evaluation: Mapping[str, Any], independent: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {
+        "step1": independent.get("step1"),
+        "step2": independent.get("step2"),
+        "route": independent.get("route"),
+        "next_question": independent.get("next_question"),
+        "p_cells": independent.get("p_cells"),
+        "r_executed": independent.get("r_executed"),
+        "r_cells": independent.get("r_cells"),
+    }
+    actual = {key: evaluation.get(key) for key in expected}
+    maximum, mismatches = _compare_recursive(actual, expected)
+    return {
+        "compared_fields": list(expected),
+        "numeric_absolute_tolerance": 1e-12,
+        "maximum_absolute_numeric_difference": maximum,
+        "mismatch_paths": mismatches,
+        "exact_decision_match": all(actual[key] == expected[key] for key in ("step1", "step2", "route", "next_question")),
+        "all_compared_values_match": not mismatches,
+    }
+
+
+def _bound_video_paths_and_identity(repo_root: Path) -> tuple[dict[str, dict[str, Path]], dict[str, Any]]:
+    config_path = repo_root / "configs/rc0_pixel_chroma_fast_cpu.json"
+    protocol_path = repo_root / "protocols/rc0_pixel_chroma_fast_cpu.md"
+    if sha256_file(config_path) != FROZEN_CONFIG_SHA256 or sha256_file(protocol_path) != FROZEN_PROTOCOL_SHA256:
+        raise DiagnosticError("frozen config or protocol identity mismatch")
+    tree = subprocess.run(
+        ["git", "rev-parse", f"{GENERATION_IMPLEMENTATION_COMMIT}^{{tree}}"],
+        cwd=repo_root, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if tree != GENERATION_IMPLEMENTATION_TREE:
+        raise DiagnosticError("generation implementation commit/tree mismatch")
+    paths: dict[str, dict[str, Path]] = {}
+    identity: dict[str, Any] = {}
+    videos_root = GENERATED_RUN_ROOT / "output/videos"
+    for group in GROUP_ORDER:
+        paths[group] = {}
+        identity[group] = {}
+        for condition in CONDITION_ORDER:
+            path, expected_sha = BOUND_GENERATED_ARTIFACTS[group][condition]
+            expected_path = videos_root / group / condition / "saved.mp4"
+            if path != expected_path or path.is_symlink() or not path.is_file() or path.resolve() != expected_path:
+                raise DiagnosticError(f"bound artifact path mismatch for {group}:{condition}")
+            actual_sha = sha256_file(path)
+            if actual_sha != expected_sha:
+                raise DiagnosticError(f"bound artifact SHA mismatch for {group}:{condition}")
+            stream = probe_mp4(path)
+            paths[group][condition] = path
+            identity[group][condition] = {
+                "absolute_path": str(path), "size": path.stat().st_size,
+                "sha256": actual_sha, "stream": stream,
+            }
+    return paths, identity
+
+
+def evaluate_existing_run_once(*, repo_root: Path, argv: Sequence[str], cwd: Path) -> dict[str, Any]:
+    """Evaluate the sole bound run1 artifact set without generation or encoding."""
+
+    output = EVALUATION_ONLY_OUTPUT
+    if output.exists() or output.is_symlink():
+        raise DiagnosticError("evaluation-only output already exists")
+    if output.parent != GENERATED_RUN_ROOT or not output.parent.is_dir() or output.parent.is_symlink():
+        raise DiagnosticError("frozen evaluation-only output parent mismatch")
+    started_at = utc_now()
+    video_paths, artifact_identity = _bound_video_paths_and_identity(repo_root)
+    if INDEPENDENT_RECOMPUTE_PATH.is_symlink() or not INDEPENDENT_RECOMPUTE_PATH.is_file():
+        raise DiagnosticError("bound independent recompute is unavailable")
+    if sha256_file(INDEPENDENT_RECOMPUTE_PATH) != INDEPENDENT_RECOMPUTE_SHA256:
+        raise DiagnosticError("bound independent recompute identity mismatch")
+    independent = json.loads(INDEPENDENT_RECOMPUTE_PATH.read_text(encoding="utf-8"))
+    evaluation = evaluate_saved_videos(video_paths)
+    comparison = compare_with_independent_recompute(evaluation, independent)
+    matched = bool(comparison["all_compared_values_match"] and comparison["exact_decision_match"])
+    status = "CPU_DIAGNOSTIC_RESULT_READY" if matched else "DIAGNOSTIC_INSUFFICIENT"
+    result = {
+        "schema": "sc_sstw_rc0_pixel_chroma_evaluation_only_v1",
+        "diagnostic_class": DIAGNOSTIC_CLASS,
+        "status": status,
+        "formal_result": False,
+        "stage_progression_allowed": False,
+        "generation_was_run": False,
+        "encoding_was_run": False,
+        "source_generation_implementation": {
+            "commit": GENERATION_IMPLEMENTATION_COMMIT,
+            "tree": GENERATION_IMPLEMENTATION_TREE,
+        },
+        "frozen_config_sha256": FROZEN_CONFIG_SHA256,
+        "frozen_protocol_sha256": FROZEN_PROTOCOL_SHA256,
+        "artifacts": artifact_identity,
+        "independent_recompute": {
+            "absolute_path": str(INDEPENDENT_RECOMPUTE_PATH),
+            "sha256": INDEPENDENT_RECOMPUTE_SHA256,
+        },
+        "evaluation": evaluation,
+        "comparison": comparison,
+        "started_at": started_at,
+        "ended_at": utc_now(),
+    }
+    output.mkdir(mode=0o755)
+    (output / "result.json").write_bytes(canonical_json_bytes(result) + b"\n")
+    (output / "audit.json").write_bytes(canonical_json_bytes(result) + b"\n")
+    command = {
+        "argv": list(argv), "cwd": str(cwd.resolve()), "started_at": started_at,
+        "ended_at": result["ended_at"], "exit_code": 0 if matched else 3,
+    }
+    (output / "command.json").write_bytes(canonical_json_bytes(command) + b"\n")
+    checksum_paths = sorted(path for path in output.iterdir() if path.is_file())
+    lines = [f"{sha256_file(path)}  {path.name}" for path in checksum_paths]
+    (output / "checksums.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "status": status, "diagnostic_class": DIAGNOSTIC_CLASS,
+        "actual_package_path": str(output), "step1": evaluation["step1"],
+        "step2": evaluation["step2"], "route": evaluation["route"],
+        "maximum_absolute_numeric_difference": comparison["maximum_absolute_numeric_difference"],
+    }
+
+
 def run_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path) -> dict[str, Any]:
     if output.exists() or output.is_symlink():
         raise DiagnosticError("output path already exists")
@@ -337,6 +508,7 @@ def run_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path) -
                         encoded_frames, carrier_identity = apply_carrier(source_frames, schedule_a() if condition == "A" else schedule_b())
                     path = output / "videos" / group / condition / "saved.mp4"
                     encode_mp4(encoded_frames, path)
+                    video_paths[group][condition] = path
                     stream = probe_mp4(path)
                     decoded = decode_saved_mp4(path)
                     attempt["completed"] = True
