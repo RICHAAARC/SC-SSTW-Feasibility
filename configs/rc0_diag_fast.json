@@ -1,0 +1,53 @@
+{
+  "schema": "sc_sstw_rc0_diag_fast_config_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "source_protocol": "sc_sstw_rc0_causal_localization_v2",
+  "attempt_budget": 8,
+  "group_order": ["orbital_glass", "articulated_paper"],
+  "condition_order": ["OFF_R1", "OFF_R2", "A", "B"],
+  "retry_policy": "no_retry_no_replacement_no_additional_attempts",
+  "diagnostic_questions": {
+    "step1_carrier_survival": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"],
+    "step2_relation_readout": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"]
+  },
+  "observations": {
+    "raw_saved_mp4_effect": {
+      "available": true,
+      "source": "independently_redecoded_saved_mp4_rgb24",
+      "effect": "RMS_RGB24_normalized(condition_minus_elementwise_mean_OFF_R1_OFF_R2)",
+      "off_noise": "0.5_times_RMS_RGB24_normalized(OFF_R1_minus_OFF_R2)",
+      "decision_rule": "each_group_times_A_B_requires_effect_ge_2_over_255_and_effect_ge_3_times_off_noise_with_off_noise_le_1_over_255"
+    },
+    "paired_public_30d": {
+      "available": true,
+      "source": "frozen_extract_feature_matrix_recomputed_from_saved_mp4",
+      "paired_difference": "F(condition)_minus_0.5_times_(F(OFF_R1)_plus_F(OFF_R2))",
+      "relation": "frozen_fixed_affine_schedule_projection_templates_A_B_starts_0_through_7",
+      "decision_rule": "own_template_start0_accept_and_cross_template_plus_wrong_windows_reject_with_residual_le_0.25"
+    },
+    "vae_reencode_relation": {
+      "available": false,
+      "source": "same_frozen_Wan_revision_VAE_reencode_of_redecoded_saved_mp4",
+      "preprocess": "RGB24_to_float32_range_minus1_plus1_shape_1x3x49x320x512_no_resize_no_alignment_search",
+      "latent": "deterministic_encoder_output_at_frozen_revision_expected_shape_1x16x13x40x64",
+      "off_reference": "elementwise_mean_Z_OFF_R1_Z_OFF_R2",
+      "paired_difference": "D_condition_equals_Z_condition_minus_Z_off_reference",
+      "two_coordinate_readout": "per_time_RMS_channels_0_through_7_and_per_time_RMS_channels_8_through_15",
+      "relation": "frozen_A_B_templates_starts_0_through_7_same_budget_own_start0_accept_cross_and_wrong_windows_reject",
+      "maximum_relation_residual": 0.25,
+      "unavailable_reason": "no_reviewed_saved_MP4_Wan_VAE_reencode_adapter_or_extractor_identity_in_current_minimal_implementation",
+      "blocks_raw_or_30d": false
+    }
+  },
+  "decisions": {
+    "raw_effect_fail": "CURRENT_CARRIER_NOT_FEASIBLE",
+    "raw_pass_30d_pass": "KEEP_CARRIER_BUILD_BLIND_READOUT",
+    "raw_pass_30d_fail_vae_pass": "KEEP_CARRIER_SWITCH_TO_VAE_READOUT",
+    "raw_pass_30d_fail_vae_fail": "REDESIGN_RELATION_CARRIER",
+    "identity_noise_or_unavailable_required_branch": "DIAGNOSTIC_INSUFFICIENT"
+  },
+  "authorization_claimed": false,
+  "gate_claimed": false,
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
