@@ -15,6 +15,7 @@ from src.sc_sstw_feasibility.rc0_phase_recovery_fast_cpu import (
     SCORE_TOLERANCE,
     SKIP_PENALTY,
     PhaseRecoveryDiagnosticError,
+    _require_finite_calibration_values,
     apply_time_perturbation,
     evaluate_phase_cell,
     expected_operation_path,
@@ -87,6 +88,23 @@ def test_invalid_shape_unknown_perturbation_and_config_drift_fail_closed(tmp_pat
         pass
     else:
         raise AssertionError("DP parameter drift was accepted")
+
+
+def test_calibration_matrix_and_bias_are_checked_separately_for_finiteness() -> None:
+    matrix = np.zeros((30, 2), dtype=np.float64)
+    bias = np.zeros(30, dtype=np.float64)
+    _require_finite_calibration_values(matrix, bias)
+    bad_matrix = matrix.copy()
+    bad_matrix[0, 0] = np.nan
+    bad_bias = bias.copy()
+    bad_bias[0] = np.inf
+    for candidate_matrix, candidate_bias in ((bad_matrix, bias), (matrix, bad_bias)):
+        try:
+            _require_finite_calibration_values(candidate_matrix, candidate_bias)
+        except PhaseRecoveryDiagnosticError:
+            pass
+        else:
+            raise AssertionError("non-finite calibration component was accepted")
 
 
 def test_runner_consumes_frozen_calibration_and_has_no_generation_encoding_or_refit() -> None:

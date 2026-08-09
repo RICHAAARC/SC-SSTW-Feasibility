@@ -30,7 +30,7 @@ STEP4_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0
 STEP4_AUDIT = STEP4_ROOT / "audit.json"
 STEP4_AUDIT_SHA256 = "572cc1a37a25e8a425125ee31db39e1c864c3e67604cbd964d6dc876740b3a8c"
 VIDEO_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-pixel-chroma-fast-cpu-9e19d31-run1/output/videos")
-RUN_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-phase-recovery-fast-cpu-dd24f4d-run1")
+RUN_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-phase-recovery-fast-cpu-dd24f4d-run2")
 SKIP_PENALTY = 0.22
 REPEAT_PENALTY = 0.14
 EQUALIZATION_RIDGE = 1e-4
@@ -218,6 +218,15 @@ def evaluate_phase_cell(states: Any, own_template: str, perturbation: str) -> di
     }
 
 
+def _require_finite_calibration_values(matrix: Any, bias: Any) -> None:
+    matrix_values = np.asarray(matrix, dtype=np.float64)
+    bias_values = np.asarray(bias, dtype=np.float64)
+    if matrix_values.shape != (30, 2) or bias_values.shape != (30,):
+        raise PhaseRecoveryDiagnosticError("Step4 calibration shape invalid")
+    if not np.isfinite(matrix_values).all() or not np.isfinite(bias_values).all():
+        raise PhaseRecoveryDiagnosticError("Step4 calibration is non-finite")
+
+
 def _frozen_calibration(step4: Mapping[str, Any], group: str, condition: str) -> tuple[CalibrationResult, str]:
     keys = [f"{group}:{condition}:identity", f"{group}:{condition}:private_tail_delete6_duplicate12"]
     fits: list[dict[str, Any]] = []
@@ -244,9 +253,7 @@ def _frozen_calibration(step4: Mapping[str, Any], group: str, condition: str) ->
         raise PhaseRecoveryDiagnosticError("Step4 calibration matrix invalid")
     if not isinstance(bias, list) or len(bias) != 30:
         raise PhaseRecoveryDiagnosticError("Step4 calibration bias invalid")
-    values = np.asarray(matrix + [bias], dtype=np.float64)
-    if not np.isfinite(values).all():
-        raise PhaseRecoveryDiagnosticError("Step4 calibration is non-finite")
+    _require_finite_calibration_values(matrix, bias)
     calibration = CalibrationResult(
         matrix=[[float(value) for value in row] for row in matrix],
         bias=[float(value) for value in bias],
