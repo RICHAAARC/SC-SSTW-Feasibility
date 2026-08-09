@@ -1,0 +1,48 @@
+{
+  "schema": "sc_sstw_rc0_tiny_e2e_fast_cpu_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "question": "step6_tiny_matched_control_end_to_end_pipeline_closes",
+  "input": {
+    "sample": "exact_two_matched_quartets_eight_SHA_bound_saved_mp4",
+    "groups": ["orbital_glass", "articulated_paper"],
+    "conditions": ["OFF_R1", "OFF_R2", "A", "B"],
+    "step12_audit_path": "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-pixel-chroma-fast-cpu-9e19d31-run1/evaluation-only-result/audit.json",
+    "step12_audit_sha256": "9b08c88aad5378c2b0c94574585906e96a9608d094002248fddd6761b5e1dead",
+    "step3_audit_path": "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-aisb-capture-fast-cpu-dff72da-run1/audit.json",
+    "step3_audit_sha256": "6e424acbd21a36c0c965581e475a7e03440051ad62925c37fceecb3ac1c8ba6f",
+    "step4_audit_path": "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-candidate-self-calibration-fast-cpu-b5c2cf6-run1/audit.json",
+    "step4_audit_sha256": "572cc1a37a25e8a425125ee31db39e1c864c3e67604cbd964d6dc876740b3a8c",
+    "step5_audit_path": "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-phase-recovery-fast-cpu-dd24f4d-run2/audit.json",
+    "step5_audit_sha256": "9e8b6fa4127d9293a50d64e888e6e311d33b1309f5791920c575d9d23f704a46",
+    "decode": "fresh_from_saved_mp4",
+    "feature_cache": "forbidden"
+  },
+  "pipeline": {
+    "stage_order": ["mp4_identity_decode", "level_p_presence", "paired_30D", "AISB_16_to_K8", "candidate_wise_calibration_K2_1", "DP_phase_recovery"],
+    "off_reference": "symmetric_mean_OFF_R1_OFF_R2",
+    "off_behavior": "reject_at_presence_and_do_not_enter_downstream",
+    "positive_behavior": "presence_then_capture_then_calibration_then_phase",
+    "capture_universe": 16,
+    "capture_K": 8,
+    "calibration_K2": 1,
+    "truth_usage": "post_output_audit_only",
+    "stage_feedback": "forbidden"
+  },
+  "timing": {
+    "identity_evidence": "direct_saved_mp4_projected_trajectory",
+    "synthetic_timing_diagnostics": ["delete6_duplicate12", "local_phase_plus1", "local_phase_minus1"],
+    "all_phase_perturbations": ["identity", "delete6_duplicate12", "local_phase_plus1", "local_phase_minus1"]
+  },
+  "success": {
+    "original_condition_count": 8,
+    "off_negative_count": 4,
+    "positive_condition_count": 4,
+    "phase_cell_count": 16,
+    "aggregation": "all_conditions_and_all_phase_cells_no_average_no_majority"
+  },
+  "outcomes": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"],
+  "feasible_overall": "FEASIBLE_FOR_TINY_MATCHED_CONTROL_DIAGNOSTIC",
+  "feasible_route": "METHOD_FEASIBILITY_CORE_CLOSED",
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
