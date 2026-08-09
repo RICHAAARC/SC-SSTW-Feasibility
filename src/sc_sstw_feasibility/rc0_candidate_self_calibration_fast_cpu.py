@@ -32,6 +32,7 @@ K2 = 1
 FIT_INDICES = (0, 1, 2, 3)
 HELD_OUT_INDICES = (4, 5)
 EQUALIZATION_RIDGE = 1e-4
+LEAST_SQUARES_IMPLEMENTATION_RIDGE = 1e-8
 STEP3_COMMIT = "b5c2cf62fc21f00f72e5a223af82e9acf19a746e"
 STEP3_TREE = "3a5562cdabac1a9adfca404cb89bce6b0976fb1d"
 STEP3_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-aisb-capture-fast-cpu-dff72da-run1")
@@ -74,6 +75,8 @@ def load_and_validate_config(path: Path) -> dict[str, Any]:
         raise SelfCalibrationDiagnosticError("fit/held-out split changed")
     if calibration.get("equalization_ridge") != EQUALIZATION_RIDGE or calibration.get("acceptance_threshold") is not None:
         raise SelfCalibrationDiagnosticError("calibration ridge or threshold changed")
+    if calibration.get("least_squares_regularization_argument") is not None or calibration.get("least_squares_implementation_default_ridge") != LEAST_SQUARES_IMPLEMENTATION_RIDGE:
+        raise SelfCalibrationDiagnosticError("least-squares implementation ridge changed")
     if selection.get("K2") != K2 or selection.get("score_tie") != "cell_failure":
         raise SelfCalibrationDiagnosticError("K2 or tie rule changed")
     if separation.get("capture_candidate_budget_K") != CANDIDATE_BUDGET_K:

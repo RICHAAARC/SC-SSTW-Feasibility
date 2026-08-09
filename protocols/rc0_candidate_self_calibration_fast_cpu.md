@@ -23,8 +23,10 @@ contains only its captured template (`A` or `B`) and start index. The six-row
 30D observation window is selected from the redecoded paired feature matrix.
 For that candidate alone, template points 0–3 provide exactly four public
 pilot pairs. The existing
-`sc_sstw_feasibility.calibration.calibrate_from_pilot_pairs` unregularized
-least-squares fit estimates
+`sc_sstw_feasibility.calibration.calibrate_from_pilot_pairs` is called without
+a caller override. Its existing `least_squares` helper applies the fixed
+engineering ridge `1e-8`; this is part of the pre-existing implementation, not
+a fitted diagnostic threshold. The fit estimates
 
 `observation = matrix(30×2) * q(2) + bias(30)`.
 

@@ -12,6 +12,7 @@ from src.sc_sstw_feasibility.rc0_candidate_self_calibration_fast_cpu import (
     FIT_INDICES,
     HELD_OUT_INDICES,
     K2,
+    LEAST_SQUARES_IMPLEMENTATION_RIDGE,
     SelfCalibrationDiagnosticError,
     audit_ranked_cell,
     calibrate_capture_candidates,
@@ -50,7 +51,10 @@ def test_config_freezes_separation_formula_and_k2() -> None:
     assert CANDIDATE_BUDGET_K == 8 and K2 == 1
     assert FIT_INDICES == (0, 1, 2, 3) and HELD_OUT_INDICES == (4, 5)
     assert EQUALIZATION_RIDGE == 1e-4
+    assert LEAST_SQUARES_IMPLEMENTATION_RIDGE == 1e-8
     assert config["calibration"]["fit_parameter_dimension"] == 90
+    assert config["calibration"]["least_squares_regularization_argument"] is None
+    assert config["calibration"]["least_squares_implementation_default_ridge"] == 1e-8
     assert config["calibration"]["acceptance_threshold"] is None
     assert config["separation"]["truth_available_to_fit_or_ranking"] is False
     assert config["selection"]["winner_rule"] == "strictly_lower_held_out_MSE_than_runner_up"
