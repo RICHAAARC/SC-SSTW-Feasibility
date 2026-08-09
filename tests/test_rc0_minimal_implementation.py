@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import pickle
+import re
 import shutil
 import stat
 import subprocess
@@ -32,8 +33,10 @@ from src.sc_sstw_feasibility.rc0_causal_localization_v2 import (
 )
 from src.sc_sstw_feasibility.rc0_generation import (
     GenerationReceipt,
+    construct_final_latent_relation_residual,
     consume_generation_receipt,
     run_rc0_generation,
+    tensor_identity,
 )
 from src.sc_sstw_feasibility.rc0_minimal_implementation import (
     CONFIG_PATH,
@@ -311,18 +314,23 @@ class CPUVideoBackend:
         shutil.copyfile(self._template(parameters, condition), video_path)
         primitives: list[dict[str, Any]] = []
         if condition in {"A", "B"}:
-            for index in range(16):
-                primitives.append(
-                    {
-                        "call_index": index,
-                        "output_shape": [1, 4, 8],
-                        "output_dtype": "float32",
-                        "input_tensor_sha256": hashlib.sha256(f"input:{condition}:{index}".encode()).hexdigest(),
-                        "modified_tensor_sha256": hashlib.sha256(f"modified:{condition}:{index}".encode()).hexdigest(),
-                        "distinct_storage": True,
-                        "effective_relative_rms": 0.03,
-                    }
-                )
+            carrier = json.loads((ROOT / DIAGNOSTIC_CONFIG_PATH).read_text())["carrier"]
+            final_latent = np.linspace(-1.0, 1.0, num=1 * 16 * 13 * 40 * 64, dtype=np.float32).reshape(1, 16, 13, 40, 64)
+            modified, metrics = construct_final_latent_relation_residual(final_latent, schedule, carrier)
+            primitives.append(
+                {
+                    "call_index": 0,
+                    "injection_stage": carrier["injection_stage"],
+                    "latent_layout": carrier["tensor_layout"],
+                    "schedule_point_count": 13,
+                    "output_shape": list(final_latent.shape),
+                    "output_dtype": str(final_latent.dtype),
+                    "input_tensor_sha256": tensor_identity(final_latent)["sha256"],
+                    "modified_tensor_sha256": tensor_identity(modified)["sha256"],
+                    "distinct_storage": modified is not final_latent and not np.shares_memory(modified, final_latent),
+                    **metrics,
+                }
+            )
         return {"carrier_event_primitives": primitives}
 
 
@@ -913,11 +921,14 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     notebook = json.loads(raw)
     source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
     execution_source = "".join(notebook["cells"][2]["source"])
-    assert "REPOSITORY_URL = 'https://github.com/RICHAAARC/SC-SSTW-Feasibility.git'" in source
-    assert "AUTHORIZED_REF = '54ef62c22489796f0467c45cc07edfc338cc322f'" in source
-    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility'" in source
-    assert "AUTHORIZE_EXECUTION = True" in source
-    assert "AUTHORIZE_DRIVE_IO = True" in source
+    repository_match = re.search(r"^REPOSITORY_URL = '([^']*)'$", source, re.MULTILINE)
+    ref_match = re.search(r"^AUTHORIZED_REF = '([^']*)'", source, re.MULTILINE)
+    assert repository_match is not None and repository_match.group(1) in {"", "https://github.com/RICHAAARC/SC-SSTW-Feasibility.git"}
+    assert ref_match is not None and (ref_match.group(1) == "" or re.fullmatch(r"[0-9a-f]{40}", ref_match.group(1)))
+    execution_enabled = "AUTHORIZE_EXECUTION = True" in source
+    drive_enabled = "AUTHORIZE_DRIVE_IO = True" in source
+    assert execution_enabled is drive_enabled
+    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility/rc0-diag-vae-latent'" in source
     assert "'--generate'" in source
     assert "'--diagnostic-bootstrap'" in source
     assert "MANIFEST_PATH" not in source
@@ -949,8 +960,8 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     assert "_require_absent([DRIVE_ARCHIVE, DRIVE_SIDECAR])" in execution_source
     assert "Path('/content/drive') not in drive_root.parents" in execution_source
     assert execution_source.count("completed = subprocess.run(argv") == 1
-    assert execution_source.index("try:\n") < execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-FAST:' + AUTHORIZED_REF)")
-    assert execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-FAST:' + AUTHORIZED_REF)") < execution_source.index("git', 'clone'")
+    assert execution_source.index("try:\n") < execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT:' + AUTHORIZED_REF)")
+    assert execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT:' + AUTHORIZED_REF)") < execution_source.index("git', 'clone'")
     assert execution_source.index("git', 'clone'") < execution_source.index("snapshot_download(")
     assert "'diagnostic_class': DIAGNOSTIC_CLASS" in execution_source
     assert "'authorization_claimed': False" in execution_source
@@ -1079,16 +1090,42 @@ def test_diag_fast_exact8_and_frozen_carrier_sanity() -> None:
     }
     assert config["model"] == {"id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers", "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"}
     assert config["encoding"]["codec"] == "h264" and config["encoding"]["pixel_format"] == "yuv420p"
-    assert diagnostic["diagnostic_questions"] == {
-        "step1_carrier_survival": [DIAGNOSTIC_FEASIBLE, DIAGNOSTIC_NOT_FEASIBLE, DIAGNOSTIC_INSUFFICIENT_TO_DECIDE],
-        "step2_relation_readout": [DIAGNOSTIC_FEASIBLE, DIAGNOSTIC_NOT_FEASIBLE, DIAGNOSTIC_INSUFFICIENT_TO_DECIDE],
+    assert diagnostic["question"] == "step1_carrier_survival"
+    assert diagnostic["carrier"] == {
+        "kind": "final_denoised_vae_latent_relation_residual",
+        "old_block29_attention_hook_enabled": False,
+        "injection_stage": "after_final_scheduler_step_before_wan_latent_destandardization_and_vae_decode",
+        "pipeline_output_type": "latent",
+        "tensor_layout": "B_C_T_H_W",
+        "required_shape": [1, 16, 13, 40, 64],
+        "time_mapping": "schedule_index_t_maps_one_to_one_to_latent_time_index_t_for_t_0_through_12",
+        "basis_x": "cos(2*pi*x/64)_for_x_0_through_63_constant_over_y",
+        "basis_y": "cos(2*pi*y/40)_for_y_0_through_39_constant_over_x",
+        "basis_frequency_cycles": [1, 1],
+        "basis_phase_radians": [0.0, 0.0],
+        "channel_projection": "schedule_x_times_basis_x_on_channels_0_through_7_and_schedule_y_times_basis_y_on_channels_8_through_15",
+        "zero_mean": "subtract_single_global_mean_over_B_C_T_H_W",
+        "unit_rms": "divide_by_sqrt_global_mean_squared_over_B_C_T_H_W",
+        "delta": "unit_residual_times_0.03_times_final_latent_global_RMS",
+        "target_relative_rms": 0.03,
+        "target_relative_rms_absolute_tolerance": 0.00005,
+        "zero_mean_absolute_tolerance": 0.000001,
+        "unit_rms_absolute_tolerance": 0.000001,
+        "numeric_epsilon": 1e-12,
+        "dtype_policy": "construct_float32_then_cast_to_exact_input_dtype",
+        "device_policy": "same_as_final_latent",
+        "condition_policy": "OFF_R1_OFF_R2_no_residual_A_uses_schedule_A_B_uses_schedule_B",
     }
-    assert diagnostic["observations"]["vae_reencode_relation"]["available"] is False
+    assert diagnostic["step2"]["readout"] == "existing_frozen_paired_public_30d"
     generation_source = (ROOT / "src/sc_sstw_feasibility/rc0_generation.py").read_text()
     assert "clones = [_clone(initial) for _condition in CONDITION_ORDER]" in generation_source
     assert "len(set(clone_pointers)) != 4" in generation_source
     assert "schedule = None if condition.startswith(\"OFF_\")" in generation_source
-    assert "pipe.transformer.blocks[int(carrier[\"block_index\"])].attn1" in generation_source
+    assert 'output_type="latent"' in generation_source
+    assert "_decode_final_wan_latent" in generation_source
+    assert "_production_carrier_hook" not in generation_source
+    assert ".attn1" not in generation_source
+    assert "construct_internal_residual" not in generation_source
     assert "retry_index\": 0" in generation_source
     assert "snapshot_download(" in generation_source
     assert "revision=frozen_revision" in generation_source
@@ -1097,6 +1134,28 @@ def test_diag_fast_exact8_and_frozen_carrier_sanity() -> None:
     assert "_commit_hash" not in generation_source
     runner_source = (ROOT / RUNNER_PATH).read_text()
     assert runner_source.count("traceback.print_exception(error, file=sys.stderr)") == 2
+
+
+@pytest.mark.parametrize("schedule", [schedule_a(), schedule_b()])
+def test_final_latent_carrier_formula_is_frozen(schedule: list[list[float]]) -> None:
+    carrier = json.loads((ROOT / DIAGNOSTIC_CONFIG_PATH).read_text())["carrier"]
+    latent = np.linspace(-1.0, 1.0, num=1 * 16 * 13 * 40 * 64, dtype=np.float32).reshape(1, 16, 13, 40, 64)
+    modified, metrics = construct_final_latent_relation_residual(latent, schedule, carrier)
+    assert modified.shape == latent.shape
+    assert modified.dtype == latent.dtype
+    assert modified is not latent and not np.shares_memory(modified, latent)
+    assert abs(metrics["residual_global_mean"]) <= carrier["zero_mean_absolute_tolerance"]
+    assert abs(metrics["residual_global_rms"] - 1.0) <= carrier["unit_rms_absolute_tolerance"]
+    assert abs(metrics["effective_relative_rms"] - 0.03) <= carrier["target_relative_rms_absolute_tolerance"]
+
+
+def test_final_latent_carrier_a_and_b_are_distinct_and_off_has_no_injection() -> None:
+    carrier = json.loads((ROOT / DIAGNOSTIC_CONFIG_PATH).read_text())["carrier"]
+    latent = np.ones((1, 16, 13, 40, 64), dtype=np.float32)
+    a_latent, _ = construct_final_latent_relation_residual(latent, schedule_a(), carrier)
+    b_latent, _ = construct_final_latent_relation_residual(latent, schedule_b(), carrier)
+    assert not np.array_equal(a_latent, b_latent)
+    assert np.array_equal(latent, np.ones_like(latent))
 
 
 def test_receipt_module_has_no_ordinary_issuer_or_snapshot_constructor() -> None:

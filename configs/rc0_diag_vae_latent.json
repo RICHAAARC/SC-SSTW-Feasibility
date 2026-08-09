@@ -1,0 +1,62 @@
+{
+  "schema": "sc_sstw_rc0_diag_vae_latent_config_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "question": "step1_carrier_survival",
+  "carrier": {
+    "kind": "final_denoised_vae_latent_relation_residual",
+    "old_block29_attention_hook_enabled": false,
+    "injection_stage": "after_final_scheduler_step_before_wan_latent_destandardization_and_vae_decode",
+    "pipeline_output_type": "latent",
+    "tensor_layout": "B_C_T_H_W",
+    "required_shape": [1, 16, 13, 40, 64],
+    "time_mapping": "schedule_index_t_maps_one_to_one_to_latent_time_index_t_for_t_0_through_12",
+    "basis_x": "cos(2*pi*x/64)_for_x_0_through_63_constant_over_y",
+    "basis_y": "cos(2*pi*y/40)_for_y_0_through_39_constant_over_x",
+    "basis_frequency_cycles": [1, 1],
+    "basis_phase_radians": [0.0, 0.0],
+    "channel_projection": "schedule_x_times_basis_x_on_channels_0_through_7_and_schedule_y_times_basis_y_on_channels_8_through_15",
+    "zero_mean": "subtract_single_global_mean_over_B_C_T_H_W",
+    "unit_rms": "divide_by_sqrt_global_mean_squared_over_B_C_T_H_W",
+    "delta": "unit_residual_times_0.03_times_final_latent_global_RMS",
+    "target_relative_rms": 0.03,
+    "target_relative_rms_absolute_tolerance": 0.00005,
+    "zero_mean_absolute_tolerance": 1e-06,
+    "unit_rms_absolute_tolerance": 1e-06,
+    "numeric_epsilon": 1e-12,
+    "dtype_policy": "construct_float32_then_cast_to_exact_input_dtype",
+    "device_policy": "same_as_final_latent",
+    "condition_policy": "OFF_R1_OFF_R2_no_residual_A_uses_schedule_A_B_uses_schedule_B"
+  },
+  "experiment": {
+    "group_order": ["orbital_glass", "articulated_paper"],
+    "condition_order": ["OFF_R1", "OFF_R2", "A", "B"],
+    "attempt_budget": 8,
+    "retry_policy": "no_retry_no_replacement_no_additional_attempts",
+    "same_initial_latent_policy": "one_actual_initial_latent_then_four_storage_independent_byte_identical_clones_per_group",
+    "only_allowed_difference": "condition_label_and_frozen_final_latent_residual_schedule"
+  },
+  "step1": {
+    "source": "independently_redecoded_saved_mp4_rgb24",
+    "effect": "RMS(condition_minus_elementwise_mean_OFF_R1_OFF_R2)_divided_by_255",
+    "off_noise": "0.5_times_RMS(OFF_R1_minus_OFF_R2)_divided_by_255",
+    "absolute_effect_min": 0.00784313725490196,
+    "relative_noise_multiplier": 3.0,
+    "off_noise_max": 0.00392156862745098,
+    "all_cells": "both_groups_times_A_B_must_pass",
+    "values": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"]
+  },
+  "step2": {
+    "run_only_if_step1_feasible": true,
+    "readout": "existing_frozen_paired_public_30d",
+    "values": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"]
+  },
+  "route_decisions": [
+    "CURRENT_CARRIER_NOT_FEASIBLE",
+    "KEEP_CARRIER_SWITCH_TO_VAE_READOUT",
+    "KEEP_CARRIER_BUILD_BLIND_READOUT",
+    "REDESIGN_RELATION_CARRIER",
+    "DIAGNOSTIC_INSUFFICIENT"
+  ],
+  "formal_result": false,
+  "stage_progression_allowed": false
+}

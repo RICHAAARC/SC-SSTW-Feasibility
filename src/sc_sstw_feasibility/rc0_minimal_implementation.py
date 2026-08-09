@@ -57,8 +57,8 @@ TEST_PATH = "tests/test_rc0_minimal_implementation.py"
 EXTRACTOR_PATH = "src/sc_sstw_feasibility/learned_observation.py"
 SCHEDULE_SOURCE_PATH = "src/sc_sstw_feasibility/learned_observation_l1_v2.py"
 CARRIER_HELPER_PATH = "src/sc_sstw_feasibility/gpu_internal_challenger.py"
-DIAGNOSTIC_PROTOCOL_PATH = "protocols/rc0_diag_fast.md"
-DIAGNOSTIC_CONFIG_PATH = "configs/rc0_diag_fast.json"
+DIAGNOSTIC_PROTOCOL_PATH = "protocols/rc0_diag_vae_latent.md"
+DIAGNOSTIC_CONFIG_PATH = "configs/rc0_diag_vae_latent.json"
 REQUIRED_SOURCE_PATHS = (
     CONFIG_PATH,
     PLAN_PATH,
@@ -558,6 +558,35 @@ def preflight(
     )
 
 
+def diagnostic_carrier_config(preflight_result: Preflight) -> dict[str, Any]:
+    payload = _json_object(
+        (preflight_result.repo_root / DIAGNOSTIC_CONFIG_PATH).read_bytes(),
+        "DIAGNOSTIC_CONFIG_INVALID",
+    )
+    if (
+        payload.get("schema") != "sc_sstw_rc0_diag_vae_latent_config_v1"
+        or payload.get("diagnostic_class") != DIAGNOSTIC_CLASS
+        or payload.get("question") != "step1_carrier_survival"
+        or payload.get("experiment", {}).get("attempt_budget") != 8
+        or payload.get("experiment", {}).get("retry_policy") != "no_retry_no_replacement_no_additional_attempts"
+    ):
+        raise InvalidExperiment("DIAGNOSTIC_CONFIG_INVALID", "VAE-latent diagnostic identity changed")
+    carrier = payload.get("carrier")
+    if (
+        type(carrier) is not dict
+        or carrier.get("kind") != "final_denoised_vae_latent_relation_residual"
+        or carrier.get("old_block29_attention_hook_enabled") is not False
+        or carrier.get("injection_stage") != "after_final_scheduler_step_before_wan_latent_destandardization_and_vae_decode"
+        or carrier.get("pipeline_output_type") != "latent"
+        or carrier.get("tensor_layout") != "B_C_T_H_W"
+        or carrier.get("required_shape") != [1, 16, 13, 40, 64]
+        or carrier.get("target_relative_rms") != 0.03
+        or carrier.get("target_relative_rms_absolute_tolerance") != 0.00005
+    ):
+        raise InvalidExperiment("DIAGNOSTIC_CONFIG_INVALID", "final-latent carrier contract changed")
+    return payload
+
+
 def expected_matched_parameters(preflight_result: Preflight, group: Mapping[str, Any]) -> dict[str, Any]:
     generation = preflight_result.config["generation"]
     encoding = preflight_result.config["encoding"]
@@ -647,29 +676,39 @@ def _artifact_path(record_path: Path, identity: Mapping[str, Any]) -> Path:
     return candidate
 
 
-def _validate_carrier_events(events: Any, condition: str, config: Mapping[str, Any], evidence_mode: str) -> None:
+def _validate_carrier_events(
+    events: Any,
+    condition: str,
+    preflight_result: Preflight,
+    evidence_mode: str,
+) -> None:
     if type(events) is not list:
         raise InvalidExperiment("CARRIER_RECORD_INVALID", "carrier events must be an array")
     if condition.startswith("OFF_"):
         if events:
             raise InvalidExperiment("OFF_CARRIER_EFFECT_PRESENT", "OFF attempt recorded a carrier effect")
         return
-    if len(events) != 16:
-        raise InvalidExperiment("CARRIER_CALL_BUDGET_MISMATCH", "A/B carrier call budget is not exactly 16")
+    if len(events) != 1:
+        raise InvalidExperiment("CARRIER_CALL_BUDGET_MISMATCH", "A/B final-latent carrier must inject exactly once")
     from .rc0_causal_localization_v2 import schedule_a, schedule_b
 
+    carrier = diagnostic_carrier_config(preflight_result)["carrier"]
     schedule = schedule_a() if condition == "A" else schedule_b()
     schedule_sha = sha256_bytes(canonical_json_bytes(schedule))
     expected_keys = (
         "condition",
         "call_index",
-        "schedule_step",
+        "injection_stage",
+        "latent_layout",
+        "schedule_point_count",
         "schedule_sha256",
         "output_shape",
         "output_dtype",
         "input_tensor_sha256",
         "modified_tensor_sha256",
         "distinct_storage",
+        "residual_global_mean",
+        "residual_global_rms",
         "effective_relative_rms",
         "evidence_mode",
     )
@@ -678,24 +717,27 @@ def _validate_carrier_events(events: Any, condition: str, config: Mapping[str, A
         if (
             item["condition"] != condition
             or type(item["call_index"]) is not int
-            or item["call_index"] != index
-            or type(item["schedule_step"]) is not int
-            or item["schedule_step"] != index // 2
+            or item["call_index"] != 0
+            or item["injection_stage"] != carrier["injection_stage"]
+            or item["latent_layout"] != carrier["tensor_layout"]
+            or item["schedule_point_count"] != 13
             or item["schedule_sha256"] != schedule_sha
-            or type(item["output_shape"]) is not list
-            or not item["output_shape"]
-            or any(type(value) is not int or value <= 0 for value in item["output_shape"])
+            or item["output_shape"] != carrier["required_shape"]
             or type(item["output_dtype"]) is not str
             or not item["output_dtype"]
             or not _is_sha256(item["input_tensor_sha256"])
             or not _is_sha256(item["modified_tensor_sha256"])
             or item["input_tensor_sha256"] == item["modified_tensor_sha256"]
             or item["distinct_storage"] is not True
+            or type(item["residual_global_mean"]) is not float
+            or abs(item["residual_global_mean"]) > carrier["zero_mean_absolute_tolerance"]
+            or type(item["residual_global_rms"]) is not float
+            or abs(item["residual_global_rms"] - 1.0) > carrier["unit_rms_absolute_tolerance"]
             or type(item["effective_relative_rms"]) is not float
-            or abs(item["effective_relative_rms"] - config["carrier"]["target_relative_rms"]) > config["carrier"]["target_relative_rms_absolute_tolerance"]
+            or abs(item["effective_relative_rms"] - carrier["target_relative_rms"]) > carrier["target_relative_rms_absolute_tolerance"]
             or item["evidence_mode"] != evidence_mode
         ):
-            raise InvalidExperiment("CARRIER_RECORD_INVALID", "carrier event differs from the frozen schedule, budget, or tensor contract")
+            raise InvalidExperiment("CARRIER_RECORD_INVALID", "final-latent carrier event differs from the frozen schedule or tensor contract")
 
 
 def validate_execution_record(
@@ -886,7 +928,7 @@ def validate_execution_record(
                 pending_hashes.append((f"{plan_group['group_id']}:{condition}:{artifact_name}", path, identity["sha256"]))
                 condition_paths[artifact_name] = path
             artifact_paths[(plan_group["group_id"], condition)] = condition_paths
-            _validate_carrier_events(receipt_condition.get("carrier_events"), condition, preflight_result.config, expected_mode)
+            _validate_carrier_events(receipt_condition.get("carrier_events"), condition, preflight_result, expected_mode)
             if receipt_condition.get("video_saved_complete") is not True or receipt_condition.get("video_sha256") != artifacts["video"]["sha256"]:
                 raise InvalidExperiment("GENERATION_RECEIPT_VIDEO_MISMATCH", "receipt lacks a completed saved-video binding")
 
@@ -949,7 +991,7 @@ def validate_execution_record(
             }
             if integrity != expected_integrity:
                 raise InvalidExperiment("INTEGRITY_ARTIFACT_INVALID", "disk integrity record differs from receipt")
-            _validate_carrier_events(integrity["carrier_events"], condition, preflight_result.config, expected_mode)
+            _validate_carrier_events(integrity["carrier_events"], condition, preflight_result, expected_mode)
     return record, artifact_paths, expected_mode
 
 

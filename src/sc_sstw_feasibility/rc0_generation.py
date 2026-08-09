@@ -20,7 +20,6 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from .gpu_internal_challenger import construct_internal_residual
 from .learned_observation import decode_saved_mp4, encode_saved_mp4, extract_feature_matrix
 from .rc0_causal_localization_v2 import CONDITION_ORDER, schedule_a, schedule_b
 from .rc0_minimal_implementation import (
@@ -41,6 +40,7 @@ from .rc0_minimal_implementation import (
     canonical_json_bytes,
     command_artifact,
     condition_config,
+    diagnostic_carrier_config,
     expected_matched_parameters,
     sha256_bytes,
     sha256_file,
@@ -293,53 +293,134 @@ def _prepare_initial_latent(pipe: Any, torch: Any, parameters: Mapping[str, Any]
     return latent
 
 
-def _production_carrier_hook(pipe: Any, torch: Any, condition: str, schedule: Sequence[Sequence[float]], carrier: Mapping[str, Any], primitives: list[dict[str, Any]]) -> Any:
-    target = pipe.transformer.blocks[int(carrier["block_index"])].attn1
+def construct_final_latent_relation_residual(
+    final_latent: Any,
+    schedule: Sequence[Sequence[float]],
+    carrier: Mapping[str, Any],
+) -> tuple[Any, dict[str, float]]:
+    """Apply the single frozen low-frequency relation residual."""
 
-    def hook(_module: Any, _inputs: Any, output: Any) -> Any:
-        modified, _delta, energy = construct_internal_residual(
-            torch,
-            output,
-            schedule,
-            float(carrier["target_relative_rms"]),
-            float(carrier["target_relative_rms_absolute_tolerance"]),
-            12,
-        )
-        primitives.append(
-            {
-                "call_index": len(primitives),
-                "output_shape": list(output.shape),
-                "output_dtype": str(output.dtype),
-                "input_tensor_sha256": tensor_identity(output)["sha256"],
-                "modified_tensor_sha256": tensor_identity(modified)["sha256"],
-                "distinct_storage": _storage_pointer(modified) != _storage_pointer(output),
-                "effective_relative_rms": float(energy["effective_relative_rms"]),
-            }
-        )
-        return modified
+    required_shape = list(carrier["required_shape"])
+    if list(final_latent.shape) != required_shape or len(schedule) != 13 or any(len(point) != 2 for point in schedule):
+        raise RC0GenerationError("final latent shape or schedule geometry changed")
+    epsilon = float(carrier["numeric_epsilon"])
+    target = float(carrier["target_relative_rms"])
+    if isinstance(final_latent, np.ndarray):
+        if not np.isfinite(final_latent).all():
+            raise RC0GenerationError("final latent contains non-finite values")
+        batch, channels, times, height, width = required_shape
+        x = np.arange(width, dtype=np.float32)
+        y = np.arange(height, dtype=np.float32)
+        phi_x = np.cos(2.0 * np.pi * x / width).astype(np.float32)[None, :]
+        phi_y = np.cos(2.0 * np.pi * y / height).astype(np.float32)[:, None]
+        raw = np.zeros((batch, channels, times, height, width), dtype=np.float32)
+        for time_index, point in enumerate(schedule):
+            raw[:, :8, time_index, :, :] = np.float32(point[0]) * phi_x
+            raw[:, 8:, time_index, :, :] = np.float32(point[1]) * phi_y
+        centered = raw - np.mean(raw, dtype=np.float64)
+        raw_rms = float(np.sqrt(np.mean(np.square(centered, dtype=np.float64))))
+        if not np.isfinite(raw_rms) or raw_rms <= epsilon:
+            raise RC0GenerationError("final-latent relation basis is degenerate")
+        unit = centered / np.float32(raw_rms)
+        latent_float = final_latent.astype(np.float32, copy=False)
+        latent_rms = float(np.sqrt(np.mean(np.square(latent_float, dtype=np.float64))))
+        if not np.isfinite(latent_rms) or latent_rms <= epsilon:
+            raise RC0GenerationError("final latent RMS is degenerate")
+        delta = unit * np.float32(target * latent_rms)
+        modified = final_latent + delta.astype(final_latent.dtype, copy=False)
+        actual_delta = modified.astype(np.float32) - latent_float
+        effective = float(np.sqrt(np.mean(np.square(actual_delta, dtype=np.float64))) / latent_rms)
+        unit_mean = float(np.mean(unit, dtype=np.float64))
+        unit_rms = float(np.sqrt(np.mean(np.square(unit, dtype=np.float64))))
+    else:
+        try:
+            torch = __import__("torch")
+        except Exception as exc:  # pragma: no cover - production dependency
+            raise RC0GenerationError("torch is unavailable for final-latent carrier") from exc
+        if not isinstance(final_latent, torch.Tensor) or not torch.isfinite(final_latent).all().item():
+            raise RC0GenerationError("final latent must be a finite torch tensor")
+        batch, channels, times, height, width = required_shape
+        x = torch.arange(width, device=final_latent.device, dtype=torch.float32)
+        y = torch.arange(height, device=final_latent.device, dtype=torch.float32)
+        phi_x = torch.cos(2.0 * torch.pi * x / width).view(1, width)
+        phi_y = torch.cos(2.0 * torch.pi * y / height).view(height, 1)
+        raw = torch.zeros((batch, channels, times, height, width), device=final_latent.device, dtype=torch.float32)
+        for time_index, point in enumerate(schedule):
+            raw[:, :8, time_index, :, :] = float(point[0]) * phi_x
+            raw[:, 8:, time_index, :, :] = float(point[1]) * phi_y
+        centered = raw - raw.mean()
+        raw_rms_tensor = centered.square().mean().sqrt()
+        raw_rms = float(raw_rms_tensor.item())
+        if not np.isfinite(raw_rms) or raw_rms <= epsilon:
+            raise RC0GenerationError("final-latent relation basis is degenerate")
+        unit = centered / raw_rms_tensor
+        latent_float = final_latent.float()
+        latent_rms_tensor = latent_float.square().mean().sqrt()
+        latent_rms = float(latent_rms_tensor.item())
+        if not np.isfinite(latent_rms) or latent_rms <= epsilon:
+            raise RC0GenerationError("final latent RMS is degenerate")
+        delta = unit * (target * latent_rms_tensor)
+        modified = final_latent + delta.to(dtype=final_latent.dtype)
+        actual_delta = modified.float() - latent_float
+        effective = float((actual_delta.square().mean().sqrt() / latent_rms_tensor).item())
+        unit_mean = float(unit.mean().item())
+        unit_rms = float(unit.square().mean().sqrt().item())
+    if (
+        abs(unit_mean) > float(carrier["zero_mean_absolute_tolerance"])
+        or abs(unit_rms - 1.0) > float(carrier["unit_rms_absolute_tolerance"])
+        or abs(effective - target) > float(carrier["target_relative_rms_absolute_tolerance"])
+    ):
+        raise RC0GenerationError("final-latent carrier normalization missed its frozen tolerance")
+    return modified, {
+        "residual_global_mean": unit_mean,
+        "residual_global_rms": unit_rms,
+        "effective_relative_rms": effective,
+    }
 
-    return target.register_forward_hook(hook)
+
+def _decode_final_wan_latent(pipe: Any, torch: Any, final_latent: Any) -> Any:
+    latents = final_latent.to(pipe.vae.dtype)
+    latents_mean = torch.tensor(pipe.vae.config.latents_mean).view(1, pipe.vae.config.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
+    latents_std = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(1, pipe.vae.config.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
+    video = pipe.vae.decode(latents / latents_std + latents_mean, return_dict=False)[0]
+    return pipe.video_processor.postprocess_video(video, output_type="np")
 
 
 def _run_production_condition(pipe: Any, torch: Any, preflight_result: Preflight, parameters: Mapping[str, Any], latent: Any, condition: str, video_path: Path) -> list[dict[str, Any]]:
     primitives: list[dict[str, Any]] = []
     schedule = None if condition.startswith("OFF_") else (schedule_a() if condition == "A" else schedule_b())
-    handle = None if schedule is None else _production_carrier_hook(pipe, torch, condition, schedule, preflight_result.config["carrier"], primitives)
-    try:
-        result = pipe(
-            prompt=parameters["prompt"],
-            negative_prompt=parameters["negative_prompt"],
-            num_frames=int(parameters["frame_count"]),
-            height=int(parameters["height"]),
-            width=int(parameters["width"]),
-            guidance_scale=float(parameters["guidance_scale"]),
-            num_inference_steps=int(parameters["inference_steps"]),
-            latents=latent,
+    result = pipe(
+        prompt=parameters["prompt"],
+        negative_prompt=parameters["negative_prompt"],
+        num_frames=int(parameters["frame_count"]),
+        height=int(parameters["height"]),
+        width=int(parameters["width"]),
+        guidance_scale=float(parameters["guidance_scale"]),
+        num_inference_steps=int(parameters["inference_steps"]),
+        latents=latent,
+        output_type="latent",
+    )
+    final_latent = result.frames
+    if schedule is not None:
+        carrier = diagnostic_carrier_config(preflight_result)["carrier"]
+        modified, metrics = construct_final_latent_relation_residual(final_latent, schedule, carrier)
+        primitives.append(
+            {
+                "call_index": 0,
+                "injection_stage": carrier["injection_stage"],
+                "latent_layout": carrier["tensor_layout"],
+                "schedule_point_count": 13,
+                "output_shape": list(final_latent.shape),
+                "output_dtype": str(final_latent.dtype),
+                "input_tensor_sha256": tensor_identity(final_latent)["sha256"],
+                "modified_tensor_sha256": tensor_identity(modified)["sha256"],
+                "distinct_storage": _storage_pointer(modified) != _storage_pointer(final_latent),
+                **metrics,
+            }
         )
-    finally:
-        if handle is not None:
-            handle.remove()
-    frames = result.frames[0] if len(result.frames) == 1 else result.frames
+        final_latent = modified
+    decoded = _decode_final_wan_latent(pipe, torch, final_latent)
+    frames = decoded[0] if len(decoded) == 1 else decoded
     encode_saved_mp4(frames, video_path)
     return primitives
 
@@ -351,17 +432,22 @@ def _finalize_events(primitives: Any, condition: str, evidence_mode: str) -> lis
         if primitives:
             raise RC0GenerationError("OFF condition produced carrier event primitives")
         return []
-    if len(primitives) != 16:
-        raise RC0GenerationError("A/B carrier event primitive budget is not exactly 16")
+    if len(primitives) != 1:
+        raise RC0GenerationError("A/B final-latent carrier event budget is not exactly one")
     schedule = schedule_a() if condition == "A" else schedule_b()
     schedule_sha = sha256_bytes(canonical_json_bytes(schedule))
     expected_keys = {
         "call_index",
+        "injection_stage",
+        "latent_layout",
+        "schedule_point_count",
         "output_shape",
         "output_dtype",
         "input_tensor_sha256",
         "modified_tensor_sha256",
         "distinct_storage",
+        "residual_global_mean",
+        "residual_global_rms",
         "effective_relative_rms",
     }
     events: list[dict[str, Any]] = []
@@ -374,13 +460,17 @@ def _finalize_events(primitives: Any, condition: str, evidence_mode: str) -> lis
             {
                 "condition": condition,
                 "call_index": index,
-                "schedule_step": index // 2,
+                "injection_stage": primitive["injection_stage"],
+                "latent_layout": primitive["latent_layout"],
+                "schedule_point_count": primitive["schedule_point_count"],
                 "schedule_sha256": schedule_sha,
                 "output_shape": primitive["output_shape"],
                 "output_dtype": primitive["output_dtype"],
                 "input_tensor_sha256": primitive["input_tensor_sha256"],
                 "modified_tensor_sha256": primitive["modified_tensor_sha256"],
                 "distinct_storage": primitive["distinct_storage"],
+                "residual_global_mean": primitive["residual_global_mean"],
+                "residual_global_rms": primitive["residual_global_rms"],
                 "effective_relative_rms": primitive["effective_relative_rms"],
                 "evidence_mode": evidence_mode,
             }
