@@ -41,7 +41,20 @@ STEP_AUDITS = {
     ),
 }
 VIDEO_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-pixel-chroma-fast-cpu-9e19d31-run1/output/videos")
-RUN_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-tiny-e2e-fast-cpu-071d054-run1")
+RUN_ROOT = Path("/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-tiny-e2e-fast-cpu-071d054-run2")
+PHASE_SCIENTIFIC_FIELDS = (
+    "own_template", "cross_template", "perturbation", "source_indices",
+    "expected_operations", "recovered_operations", "primary_diagonal_path",
+    "expected_diagonal_path", "skip_count", "repeat_count", "edit_count",
+    "maximum_edit_budget", "own_score", "own_average_cost", "cross_score",
+    "cross_average_cost", "own_beats_cross", "bounded_score_crosscheck",
+    "bounded_abandoned", "complete_backtracker_score", "score_consistent",
+    "path_exact", "edit_exact", "passed",
+)
+PHASE_WRAPPER_FIELDS = (
+    "group", "condition_truth_for_post_recovery_audit",
+    "frozen_calibration_sha256",
+)
 
 
 class TinyE2EDiagnosticError(RuntimeError):
@@ -191,6 +204,34 @@ def _validate_inputs(repo_root: Path) -> tuple[dict[str, dict[str, Path]], dict[
     return paths, audits, {"audits": audit_identity, "videos": videos, "config_sha256": sha256_file(config_path), "protocol_sha256": sha256_file(protocol_path), "config": config}
 
 
+def compare_phase_common_fields(
+    actual: Mapping[str, Any],
+    prior: Mapping[str, Any],
+    *,
+    group: str,
+    condition: str,
+    calibration_sha256: str,
+    path: str,
+) -> tuple[float, list[str]]:
+    if set(actual) != set(PHASE_SCIENTIFIC_FIELDS):
+        return math.inf, [f"{path}.actual_scientific_keys"]
+    if set(prior) != set(PHASE_SCIENTIFIC_FIELDS) | set(PHASE_WRAPPER_FIELDS):
+        return math.inf, [f"{path}.prior_scientific_and_wrapper_keys"]
+    actual_science = {field: actual[field] for field in PHASE_SCIENTIFIC_FIELDS}
+    prior_science = {field: prior[field] for field in PHASE_SCIENTIFIC_FIELDS}
+    maximum, mismatches = _compare_recursive(actual_science, prior_science, f"{path}.scientific")
+    expected_wrapper = {
+        "group": group,
+        "condition_truth_for_post_recovery_audit": condition,
+        "frozen_calibration_sha256": calibration_sha256,
+    }
+    for field in PHASE_WRAPPER_FIELDS:
+        if prior[field] != expected_wrapper[field]:
+            mismatches.append(f"{path}.wrapper.{field}")
+            maximum = math.inf
+    return maximum, mismatches
+
+
 def _stage_identity_checks(outputs: Mapping[str, Any], audits: Mapping[str, Any]) -> dict[str, Any]:
     checks: dict[str, Any] = {}
     for group in GROUP_ORDER:
@@ -204,9 +245,15 @@ def _stage_identity_checks(outputs: Mapping[str, Any], audits: Mapping[str, Any]
             comparisons["capture"] = _compare_recursive(output["capture"]["candidate_set"], prior_capture, f"{key}.capture")
             prior_ranked = audits["step4"]["cells"][f"{key}:identity"]["ranked_candidates"]
             comparisons["calibration"] = _compare_recursive(output["calibration"]["ranked_candidates"], prior_ranked, f"{key}.calibration")
+            calibration_sha = hashlib.sha256(canonical_json_bytes(output["calibration"]["ranked_candidates"][0]["fit"])).hexdigest()
             for perturbation in PERTURBATION_ORDER:
                 prior_phase = audits["step5"]["cells"][f"{key}:{perturbation}"]
-                comparisons[f"phase:{perturbation}"] = _compare_recursive(output["phase"][perturbation], prior_phase, f"{key}.phase.{perturbation}")
+                comparisons[f"phase:{perturbation}"] = compare_phase_common_fields(
+                    output["phase"][perturbation], prior_phase,
+                    group=group, condition=condition,
+                    calibration_sha256=calibration_sha,
+                    path=f"{key}.phase.{perturbation}",
+                )
             mismatches = [path for _, paths in comparisons.values() for path in paths]
             checks[key] = {"all_match": not mismatches, "maximum_absolute_difference": max((difference for difference, _ in comparisons.values()), default=0.0), "mismatch_paths": mismatches}
     return checks

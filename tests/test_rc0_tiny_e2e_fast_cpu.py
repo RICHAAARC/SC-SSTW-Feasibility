@@ -9,9 +9,12 @@ import numpy as np
 from src.sc_sstw_feasibility.rc0_causal_localization_v2 import schedule_a
 from src.sc_sstw_feasibility.rc0_tiny_e2e_fast_cpu import (
     STEP_AUDITS,
+    PHASE_SCIENTIFIC_FIELDS,
+    PHASE_WRAPPER_FIELDS,
     TinyE2EDiagnosticError,
     _truth_audit,
     capture_candidates_without_truth,
+    compare_phase_common_fields,
     load_and_validate_config,
     run_condition_pipeline,
     run_step6_once,
@@ -62,6 +65,30 @@ def test_pipeline_signature_has_no_expected_truth_and_truth_is_separate() -> Non
     assert "condition" not in inspect.signature(run_condition_pipeline).parameters
     source = inspect.getsource(run_step6_once)
     assert source.index("outputs[f\"{group}:{condition}\"] = run_condition_pipeline") < source.index("_truth_audit(outputs)")
+
+
+def test_phase_common_fields_ignore_only_fixed_wrapper_and_reject_science_drift() -> None:
+    actual = {field: 0 for field in PHASE_SCIENTIFIC_FIELDS}
+    calibration_sha = "a" * 64
+    prior = dict(actual)
+    prior.update({
+        "group": "orbital_glass",
+        "condition_truth_for_post_recovery_audit": "A",
+        "frozen_calibration_sha256": calibration_sha,
+    })
+    assert set(prior) - set(actual) == set(PHASE_WRAPPER_FIELDS)
+    maximum, mismatches = compare_phase_common_fields(
+        actual, prior, group="orbital_glass", condition="A",
+        calibration_sha256=calibration_sha, path="cell",
+    )
+    assert maximum == 0.0 and mismatches == []
+    drifted = dict(prior)
+    drifted["own_score"] = 1
+    maximum, mismatches = compare_phase_common_fields(
+        actual, drifted, group="orbital_glass", condition="A",
+        calibration_sha256=calibration_sha, path="cell",
+    )
+    assert maximum == 1.0 and mismatches == ["cell.scientific.own_score"]
 
 
 def test_truth_audit_requires_off_short_circuit_and_all_positive_phase_cells() -> None:
