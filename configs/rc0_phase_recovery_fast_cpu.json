@@ -1,0 +1,82 @@
+{
+  "schema": "sc_sstw_rc0_phase_recovery_fast_cpu_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "question": "step5_viterbi_bounded_dtw_closes_phase_recovery_under_minimal_time_edits",
+  "input": {
+    "step4_execution_commit": "e57151a502343d3a365df708be366c5f0040283a",
+    "step4_execution_tree": "78c6206948de76cb525aecc823d88c16e597a22e",
+    "step4_clarification_commit": "dd24f4d9ee2841c94a1ef491efa2791f4585bfa7",
+    "step4_clarification_tree": "6b0f29833b7be59d4489203b8dfd1ba7bef735e5",
+    "step4_audit_path": "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-candidate-self-calibration-fast-cpu-b5c2cf6-run1/audit.json",
+    "step4_audit_sha256": "572cc1a37a25e8a425125ee31db39e1c864c3e67604cbd964d6dc876740b3a8c",
+    "video_source": "redecode_same_eight_SHA_bound_saved_mp4_and_recompute_frozen_30D",
+    "candidate_source": "Step4_K2_equals_1_own_template_start0_only",
+    "calibration_source": "consume_Step4_recorded_matrix_and_bias_without_refit",
+    "generation": "forbidden",
+    "encoding": "forbidden",
+    "capture_search": "forbidden",
+    "calibration_refit": "forbidden"
+  },
+  "projection": {
+    "paired_difference": "F(condition)-0.5*(F(OFF_R1)+F(OFF_R2))",
+    "observation_shape": [13, 30],
+    "projected_shape": [13, 2],
+    "equalization_ridge": 0.0001,
+    "full_trajectory": true
+  },
+  "dp": {
+    "primary_implementation": "sc_sstw_feasibility.sync.dynamic_time_sync",
+    "crosscheck_implementation": "sc_sstw_feasibility.sync.dynamic_time_sync_score_bounded",
+    "state": "consumed_observed_i_consumed_template_j",
+    "local_cost": "squared_Euclidean_2D",
+    "transition_tie_order": ["MATCH", "SKIP_TEMPLATE", "REPEAT_TEMPLATE"],
+    "skip_penalty": 0.22,
+    "repeat_penalty": 0.14,
+    "band": null,
+    "band_semantics": "full_13x13_rectangle_existing_implementation_has_no_band",
+    "start": [0, 0],
+    "end": [13, 13],
+    "leading_template_skip": true,
+    "leading_observed_repeat": false,
+    "maximum_edit_budget": 2,
+    "score": "negative_final_cost_divided_by_diagonal_match_count",
+    "engineering_score_tolerance": 1e-12
+  },
+  "perturbations": [
+    {
+      "id": "identity",
+      "source_indices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      "expected_skip_count": 0,
+      "expected_repeat_count": 0
+    },
+    {
+      "id": "delete6_duplicate12",
+      "source_indices": [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 12],
+      "expected_skip_count": 1,
+      "expected_repeat_count": 1
+    },
+    {
+      "id": "local_phase_plus1",
+      "source_indices": [0, 1, 2, 3, 4, 5, 7, 7, 8, 9, 10, 11, 12],
+      "expected_skip_count": 1,
+      "expected_repeat_count": 1
+    },
+    {
+      "id": "local_phase_minus1",
+      "source_indices": [0, 1, 2, 3, 4, 5, 5, 7, 8, 9, 10, 11, 12],
+      "expected_skip_count": 1,
+      "expected_repeat_count": 1
+    }
+  ],
+  "success": {
+    "cell_grid": "two_groups_times_A_B_times_four_perturbations",
+    "exact_cell_count": 16,
+    "path": "exact_preregistered_full_operation_path",
+    "own_vs_cross": "own_score_strictly_greater_than_cross_score",
+    "aggregation": "all_cells_no_average_no_majority"
+  },
+  "outcomes": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"],
+  "feasible_route": "PROCEED_STEP6_TINY_E2E_CPU",
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
