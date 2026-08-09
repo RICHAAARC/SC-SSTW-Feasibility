@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -302,7 +303,12 @@ def _load_production_pipeline(wan_pipeline: Any, torch: Any, resolved_snapshot: 
         local_files_only=True,
     )
     pipe.enable_model_cpu_offload()
-    pipe.vae.enable_tiling()
+    pipe.vae.enable_tiling(
+        tile_sample_min_height=192,
+        tile_sample_min_width=192,
+        tile_sample_stride_height=128,
+        tile_sample_stride_width=128,
+    )
     if not str(pipe._execution_device).startswith("cuda"):
         raise RC0GenerationError("Wan CPU offload did not retain a CUDA execution device")
     return pipe
@@ -534,6 +540,23 @@ def _run_generation_control_flow(
         ):
             raise RC0GenerationError("local model snapshot differs from the frozen revision")
         pipe = _load_production_pipeline(WanPipeline, torch, resolved_snapshot)
+        vae_memory_policy = {
+            "vae_use_tiling": bool(pipe.vae.use_tiling),
+            "tile_sample_min_height": int(pipe.vae.tile_sample_min_height),
+            "tile_sample_min_width": int(pipe.vae.tile_sample_min_width),
+            "tile_sample_stride_height": int(pipe.vae.tile_sample_stride_height),
+            "tile_sample_stride_width": int(pipe.vae.tile_sample_stride_width),
+            "allocator": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+        }
+        if vae_memory_policy != {
+            "vae_use_tiling": True,
+            "tile_sample_min_height": 192,
+            "tile_sample_min_width": 192,
+            "tile_sample_stride_height": 128,
+            "tile_sample_stride_width": 128,
+            "allocator": "expandable_segments:True",
+        }:
+            raise RC0GenerationError("Wan VAE memory policy differs from the frozen diagnostic setting")
         observed_revision = frozen_revision
         scheduler = {
             "class": type(pipe.scheduler).__name__,
@@ -546,6 +569,7 @@ def _run_generation_control_flow(
             "scheduler": scheduler,
             "dtype": str(next(pipe.transformer.parameters()).dtype),
             "device": str(pipe._execution_device),
+            "vae_memory_policy": vae_memory_policy,
             "cpu_only_test_harness": False,
         }
     else:

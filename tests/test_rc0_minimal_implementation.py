@@ -926,6 +926,10 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
         "from google.colab import drive\n",
         "drive.mount('/content/drive')\n",
     ]
+    assert code_cells[1]["source"][:2] == [
+        "import os\n",
+        "os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'\n",
+    ]
     execution_source = "".join(code_cells[2]["source"])
     assert source.count("from google.colab import drive") == 1
     assert source.count("drive.mount('/content/drive')") == 1
@@ -937,7 +941,7 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     execution_enabled = "AUTHORIZE_EXECUTION = True" in source
     drive_enabled = "AUTHORIZE_DRIVE_IO = True" in source
     assert execution_enabled is drive_enabled
-    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility/rc0-diag-vae-latent-tiling'" in source
+    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility/rc0-diag-vae-latent-small-tile'" in source
     assert "'--generate'" in source
     assert "'--diagnostic-bootstrap'" in source
     assert "MANIFEST_PATH" not in source
@@ -969,8 +973,8 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     assert "_require_absent([DRIVE_ARCHIVE, DRIVE_SIDECAR])" in execution_source
     assert "Path('/content/drive') not in drive_root.parents" in execution_source
     assert execution_source.count("completed = subprocess.run(argv") == 1
-    assert execution_source.index("try:\n") < execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-TILING:' + AUTHORIZED_REF)")
-    assert execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-TILING:' + AUTHORIZED_REF)") < execution_source.index("git', 'clone'")
+    assert execution_source.index("try:\n") < execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-SMALL-TILE:' + AUTHORIZED_REF)")
+    assert execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-SMALL-TILE:' + AUTHORIZED_REF)") < execution_source.index("git', 'clone'")
     assert execution_source.index("git', 'clone'") < execution_source.index("snapshot_download(")
     assert "'diagnostic_class': DIAGNOSTIC_CLASS" in execution_source
     assert "'authorization_claimed': False" in execution_source
@@ -991,6 +995,13 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     assert "token=" not in execution_source and "revision='main'" not in execution_source and "revision=\"main\"" not in execution_source
     assert execution_source.index("snapshot_path.resolve(strict=True)") < execution_source.index("completed = subprocess.run(argv")
     assert source.index("drive.mount('/content/drive')") < source.index("completed = subprocess.run(argv")
+    allocator_index = source.index("os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'")
+    assert source.index("drive.mount('/content/drive')") < allocator_index
+    assert allocator_index < source.index("'pip', 'install'")
+    assert allocator_index < source.index("    import torch")
+    assert allocator_index < source.index("snapshot_download(")
+    assert allocator_index < source.index("completed = subprocess.run(argv")
+    assert "import torch" not in "".join(code_cells[1]["source"])
     assert execution_source.index("audit = json.loads") < execution_source.index("expected_exit =")
     archive_call = execution_source.index("        _zip_tree_exclusive(ARCHIVE_ROOT, ARCHIVE)")
     archive_test = execution_source.index("        with zipfile.ZipFile(ARCHIVE) as handle:", archive_call)
@@ -1151,8 +1162,33 @@ def test_production_pipeline_uses_single_cpu_offload_policy() -> None:
     calls: list[str] = []
 
     class FakeVAE:
-        def enable_tiling(self) -> None:
-            calls.append("tiling")
+        use_tiling = False
+        tile_sample_min_height = 256
+        tile_sample_min_width = 256
+        tile_sample_stride_height = 192
+        tile_sample_stride_width = 192
+
+        def enable_tiling(
+            self,
+            *,
+            tile_sample_min_height: int,
+            tile_sample_min_width: int,
+            tile_sample_stride_height: int,
+            tile_sample_stride_width: int,
+        ) -> None:
+            values = (
+                tile_sample_min_height,
+                tile_sample_min_width,
+                tile_sample_stride_height,
+                tile_sample_stride_width,
+            )
+            assert values == (192, 192, 128, 128)
+            self.use_tiling = True
+            self.tile_sample_min_height = tile_sample_min_height
+            self.tile_sample_min_width = tile_sample_min_width
+            self.tile_sample_stride_height = tile_sample_stride_height
+            self.tile_sample_stride_width = tile_sample_stride_width
+            calls.append("tiling:192:192:128:128")
 
     class FakePipe:
         def __init__(self) -> None:
@@ -1165,7 +1201,7 @@ def test_production_pipeline_uses_single_cpu_offload_policy() -> None:
 
         @property
         def _execution_device(self) -> str:
-            assert self.offload_enabled and calls == ["offload", "tiling"]
+            assert self.offload_enabled and calls == ["offload", "tiling:192:192:128:128"]
             return "cuda:0"
 
     class FakeWanPipeline:
@@ -1182,20 +1218,40 @@ def test_production_pipeline_uses_single_cpu_offload_policy() -> None:
     snapshot = Path("/tmp/frozen-wan-snapshot")
     pipe = _load_production_pipeline(FakeWanPipeline, FakeTorch, snapshot)
     assert pipe.offload_enabled is True
-    assert calls == ["offload", "tiling"]
+    assert calls == ["offload", "tiling:192:192:128:128"]
     assert FakeWanPipeline.call == (str(snapshot), FakeTorch.bfloat16, True)
     generation_source = (ROOT / "src/sc_sstw_feasibility/rc0_generation.py").read_text()
     assert "pipe.enable_model_cpu_offload()" in generation_source
-    assert "pipe.vae.enable_tiling()" in generation_source
-    assert generation_source.index("pipe.enable_model_cpu_offload()") < generation_source.index("pipe.vae.enable_tiling()")
+    tiling_call = """pipe.vae.enable_tiling(
+        tile_sample_min_height=192,
+        tile_sample_min_width=192,
+        tile_sample_stride_height=128,
+        tile_sample_stride_width=128,
+    )"""
+    assert generation_source.count(tiling_call) == 1
+    assert generation_source.index("pipe.enable_model_cpu_offload()") < generation_source.index(tiling_call)
     assert '.to("cuda")' not in generation_source and ".to('cuda')" not in generation_source
     assert "enable_slicing" not in generation_source
-    assert "enable_tiling(" not in generation_source.replace("enable_tiling()", "")
-    forbidden_tile_options = ("tile_sample_min_height", "tile_sample_min_width", "tile_sample_stride_height", "tile_sample_stride_width")
+    assert "for " not in tiling_call and "range(" not in tiling_call
+    assert 192 // 8 == 24 and 128 // 8 == 16
+    assert list(range(0, 40, 16)) == [0, 16, 32]
+    assert list(range(0, 64, 16)) == [0, 16, 32, 48]
+    assert min(40 - 32, 64 - 48) == 8
+    forbidden_tile_options = ("--tile", "tile_options", "tile_candidates")
     runner_source = (ROOT / RUNNER_PATH).read_text()
     notebook_source = (ROOT / NOTEBOOK_PATH).read_text()
     diagnostic_config = (ROOT / DIAGNOSTIC_CONFIG_PATH).read_text()
     assert not any(option in generation_source or option in runner_source or option in notebook_source or option in diagnostic_config for option in forbidden_tile_options)
+    implementation_source = (ROOT / "src/sc_sstw_feasibility/rc0_minimal_implementation.py").read_text()
+    for identity in (
+        '"vae_use_tiling": True',
+        '"tile_sample_min_height": 192',
+        '"tile_sample_min_width": 192',
+        '"tile_sample_stride_height": 128',
+        '"tile_sample_stride_width": 128',
+        '"allocator": "expandable_segments:True"',
+    ):
+        assert identity in generation_source and identity in implementation_source
     assert "pipe._execution_device" in generation_source
     assert 'output_type="latent"' in generation_source
     assert "construct_final_latent_relation_residual(final_latent, schedule, carrier)" in generation_source

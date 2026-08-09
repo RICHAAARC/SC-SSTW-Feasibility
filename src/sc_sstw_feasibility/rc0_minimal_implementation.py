@@ -790,6 +790,15 @@ def validate_execution_record(
         or not loaded_identity["dtype"]
         or type(loaded_identity.get("device")) is not str
         or "cuda" not in loaded_identity["device"].lower()
+        or loaded_identity.get("vae_memory_policy")
+        != {
+            "vae_use_tiling": True,
+            "tile_sample_min_height": 192,
+            "tile_sample_min_width": 192,
+            "tile_sample_stride_height": 128,
+            "tile_sample_stride_width": 128,
+            "allocator": "expandable_segments:True",
+        }
         or loaded_identity.get("cpu_only_test_harness") is not False
     ):
         raise InvalidExperiment("LOADED_RUNTIME_IDENTITY_MISMATCH", "production loaded model, scheduler, dtype, or CUDA identity changed")
