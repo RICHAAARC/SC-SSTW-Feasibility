@@ -1090,6 +1090,13 @@ def test_diag_fast_exact8_and_frozen_carrier_sanity() -> None:
     assert "schedule = None if condition.startswith(\"OFF_\")" in generation_source
     assert "pipe.transformer.blocks[int(carrier[\"block_index\"])].attn1" in generation_source
     assert "retry_index\": 0" in generation_source
+    assert "snapshot_download(" in generation_source
+    assert "revision=frozen_revision" in generation_source
+    assert "local_files_only=True" in generation_source
+    assert "WanPipeline.from_pretrained(\n            str(resolved_snapshot)" in generation_source
+    assert "_commit_hash" not in generation_source
+    runner_source = (ROOT / RUNNER_PATH).read_text()
+    assert runner_source.count("traceback.print_exception(error, file=sys.stderr)") == 2
 
 
 def test_receipt_module_has_no_ordinary_issuer_or_snapshot_constructor() -> None:

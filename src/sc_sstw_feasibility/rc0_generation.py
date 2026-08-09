@@ -408,18 +408,32 @@ def _run_generation_control_flow(
             import diffusers
             import torch
             from diffusers import WanPipeline
+            from huggingface_hub import snapshot_download
         except Exception as exc:
             raise RC0GenerationError("locked GPU dependencies are unavailable") from exc
         runtime = _environment(torch, diffusers)
+        frozen_revision = preflight_result.config["model"]["revision"]
+        snapshot_path = Path(
+            snapshot_download(
+                repo_id=preflight_result.config["model"]["id"],
+                revision=frozen_revision,
+                local_files_only=True,
+            )
+        )
+        resolved_snapshot = snapshot_path.resolve(strict=True)
+        if (
+            snapshot_path.is_symlink()
+            or not snapshot_path.is_dir()
+            or snapshot_path.name != frozen_revision
+            or resolved_snapshot.name != frozen_revision
+        ):
+            raise RC0GenerationError("local model snapshot differs from the frozen revision")
         pipe = WanPipeline.from_pretrained(
-            preflight_result.config["model"]["id"],
-            revision=preflight_result.config["model"]["revision"],
+            str(resolved_snapshot),
             torch_dtype=torch.bfloat16,
             local_files_only=True,
         ).to("cuda")
-        observed_revision = getattr(pipe.config, "_commit_hash", None) or getattr(pipe.transformer.config, "_commit_hash", None)
-        if observed_revision != preflight_result.config["model"]["revision"]:
-            raise RC0GenerationError("loaded model revision differs from the frozen revision")
+        observed_revision = frozen_revision
         scheduler = {
             "class": type(pipe.scheduler).__name__,
             "config_sha256": sha256_bytes(canonical_json_bytes(dict(pipe.scheduler.config))),

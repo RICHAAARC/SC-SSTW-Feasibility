@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import traceback
 from typing import Any, Callable, Mapping
 
 
@@ -411,6 +412,8 @@ def run(
             fault=_test_fault,
         )
     except Exception as error:
+        if diagnostic_only:
+            traceback.print_exception(error, file=sys.stderr)
         return _write_invalid_best_effort(
             output,
             command,
@@ -477,6 +480,8 @@ def run(
         reason_code = error.reason_code
         exception_type = type(error).__name__
     except Exception as error:
+        if diagnostic_only:
+            traceback.print_exception(error, file=sys.stderr)
         reason_code = _unexpected_reason(error)
         exception_type = type(error).__name__
     finally:
