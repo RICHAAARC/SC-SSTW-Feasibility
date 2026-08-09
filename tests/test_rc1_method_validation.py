@@ -11,6 +11,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 
 import numpy as np
@@ -540,18 +541,20 @@ def environment(tmp_path: Path) -> dict[str, object]:
     return {"repo": repo, "prerequisite": prerequisite, "manifest_path": manifest_path, "manifest": manifest, "head": head, "tree": tree, "frozen": frozen, "execution_path": execution_path}
 
 
-def test_real_g0_cli_exports_prerequisite_consumed_by_rc1_preflight(tmp_path: Path) -> None:
-    repo = tmp_path / "combined-repo"
-    head, tree = _make_repo(repo)
-    prerequisite = _run_real_g0_success(repo, tmp_path, head, tree)
-    manifest_path = tmp_path / "rc1-authorization.json"
-    _make_manifest(manifest_path, repo, prerequisite, sha256_file(prerequisite / "checksums.sha256"), head=head, tree=tree)
-    frozen = preflight(repo, manifest_path, declared_source_commit=head)
-    assert frozen.prerequisite.selected_candidate == "A1"
-    assert frozen.prerequisite.source_head == head
-    assert frozen.prerequisite.source_tree == tree
-    produced_readout = json.loads((prerequisite / "readout.json").read_text())
-    assert np.allclose(frozen.prerequisite.readout, np.asarray(produced_readout["coefficients"]), rtol=0.0, atol=0.0)
+def test_real_g0_cli_exports_prerequisite_consumed_by_rc1_preflight() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        root = Path(temporary)
+        repo = root / "combined-repo"
+        head, tree = _make_repo(repo)
+        prerequisite = _run_real_g0_success(repo, root, head, tree)
+        manifest_path = root / "rc1-authorization.json"
+        _make_manifest(manifest_path, repo, prerequisite, sha256_file(prerequisite / "checksums.sha256"), head=head, tree=tree)
+        frozen = preflight(repo, manifest_path, declared_source_commit=head)
+        assert frozen.prerequisite.selected_candidate == "A1"
+        assert frozen.prerequisite.source_head == head
+        assert frozen.prerequisite.source_tree == tree
+        produced_readout = json.loads((prerequisite / "readout.json").read_text())
+        assert np.array_equal(frozen.prerequisite.readout, np.asarray(produced_readout["coefficients"]))
 
 
 def _rewrite_record(path: Path, mutate) -> None:
@@ -853,6 +856,14 @@ def test_missing_prerequisite_is_not_invalid_and_precedes_generation_access(tmp_
     with pytest.raises(PrerequisiteNotMet) as caught:
         validate_prerequisite_package(tmp_path / "absent", HEX64)
     assert caught.value.reason_code == "PREREQUISITE_PACKAGE_MISSING"
+
+
+def test_hidden_g0_staging_directory_is_never_a_consumable_prerequisite(tmp_path: Path) -> None:
+    staging = tmp_path / ".g0-package-staging-output-abcd"
+    _make_prerequisite(staging)
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_prerequisite_package(staging, sha256_file(staging / "checksums.sha256"))
+    assert _reason(caught) == "PREREQUISITE_PACKAGE_PARTIAL"
 
 
 @pytest.mark.parametrize(

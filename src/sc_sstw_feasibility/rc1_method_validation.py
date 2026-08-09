@@ -411,6 +411,8 @@ def _validate_thresholds(value: Any) -> dict[str, float]:
 
 
 def validate_prerequisite_package(package_path: Path, expected_checksums_sha256: str) -> FrozenPrerequisite:
+    if package_path.name.startswith(".g0-package-staging-"):
+        raise InvalidExperiment("PREREQUISITE_PACKAGE_PARTIAL", "G0 staging directories are never consumable packages")
     if not package_path.exists():
         raise PrerequisiteNotMet("PREREQUISITE_PACKAGE_MISSING", "no frozen selected-candidate package is available")
     if package_path.is_symlink() or not package_path.is_dir():

@@ -54,3 +54,18 @@ input hashes, selected candidate, derived envelope, and final-fit readout.
 The package checksum covers every delivered file. A scientific failure or any
 invalid run does not emit either RC1 prerequisite artifact. This export is
 implementation plumbing only and does not imply an independent G0 pass.
+
+The requested output path must be absent before any feature input is opened.
+An existing file, directory, symlink, or other object is never entered,
+replaced, or modified; a minimal invalid audit is instead published under a
+discoverable exclusive sibling name. Valid success and scientific-failure
+packages are assembled and self-checked in a hidden same-parent staging
+directory, then published with an atomic no-replace operation. A filesystem
+without that primitive fails closed rather than using a check-then-overwrite
+rename. Hidden `.g0-package-staging-*` directories are partial workspaces and
+are never accepted by the RC1 prerequisite consumer.
+
+Package-write failures use a separate minimal invalid writer. It emits no
+candidate trace, selected candidate, frontend, readout, partial metrics, or
+partial pass. Failure of that minimal writer is reported once as canonical
+JSON without recursively invoking either writer or exposing a traceback.

@@ -40,7 +40,10 @@ def good_features() -> dict[int, np.ndarray]:
 class CliHarness:
     def __init__(self, owner: unittest.TestCase, features: dict[int, np.ndarray] | None = None):
         self.owner = owner
-        self.temporary = tempfile.TemporaryDirectory()
+        # Atomic no-replace directory publication is unavailable on WSL DrvFS;
+        # the protocol intentionally fails closed there. Exercise the supported
+        # Linux filesystem path for positive package tests.
+        self.temporary = tempfile.TemporaryDirectory(dir="/tmp")
         self.root = Path(self.temporary.name)
         self.repo = self.root / "repo"
         self.repo.mkdir()
@@ -122,6 +125,28 @@ class CliHarness:
     def run(self, *, source_commit: str | None = None) -> tuple[subprocess.CompletedProcess[str], dict[str, object], Path]:
         self.output_index += 1
         output = self.root / f"output-{self.output_index}"
+        completed, response = self.run_at(output, source_commit=source_commit)
+        self.owner.assertTrue(response["package_written"], f"runner did not write a package: {response}")
+        actual = Path(response["actual_package_path"])
+        self.owner.assertEqual(actual, output)
+        audit_path = actual / "audit.json"
+        self.owner.assertTrue(
+            audit_path.is_file(),
+            f"runner did not create audit package\nstdout={completed.stdout}\nstderr={completed.stderr}",
+        )
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        return completed, audit, actual
+
+    def run_at(
+        self,
+        output: Path,
+        *,
+        source_commit: str | None = None,
+        fault_point: str | None = None,
+        exception_type: str = "OSError",
+        competitor_kind: str = "none",
+        _expect_json: bool = True,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         command = [
             sys.executable,
             "-B",
@@ -133,14 +158,78 @@ class CliHarness:
         ]
         if source_commit is not None:
             command.extend(("--source-commit", source_commit))
+        if fault_point is not None:
+            wrapper = self.root / "fault-runner.py"
+            wrapper.write_text(
+                """from __future__ import annotations
+import importlib.util
+from pathlib import Path
+import sys
+
+runner, manifest, output, point, exception_type, competitor_kind = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("g0_fault_runner", runner)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+fired = False
+
+def inject(name, staging, target):
+    global fired
+    if fired or name != point:
+        return
+    fired = True
+    if name.endswith("publish_race"):
+        if competitor_kind == "file":
+            target.write_bytes(b"competitor-file")
+        else:
+            target.mkdir()
+            if competitor_kind == "nonempty_dir":
+                (target / "sentinel.bin").write_bytes(b"competitor-directory")
+        return
+    errors = {"OSError": OSError, "RuntimeError": RuntimeError, "TypeError": TypeError}
+    if exception_type == "KeyboardInterrupt":
+        raise KeyboardInterrupt("injected interrupt")
+    if exception_type == "SystemExit":
+        raise SystemExit(71)
+    raise errors[exception_type](f"injected {name}")
+
+raise SystemExit(module.main(["--manifest", manifest, "--output", output], _test_fault=inject))
+""",
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                "-B",
+                str(wrapper),
+                str(self.repo / gate.RUNNER_PATH),
+                str(self.manifest_path),
+                str(output),
+                fault_point,
+                exception_type,
+                competitor_kind,
+            ]
         completed = subprocess.run(command, cwd=self.repo, capture_output=True, text=True)
-        audit_path = output / "audit.json"
-        self.owner.assertTrue(
-            audit_path.is_file(),
-            f"runner did not create audit package\nstdout={completed.stdout}\nstderr={completed.stderr}",
+        if not _expect_json:
+            return completed, {}
+        lines = completed.stdout.splitlines()
+        self.owner.assertEqual(len(lines), 1, f"runner stdout is not one canonical JSON line: {completed.stdout!r}")
+        response = json.loads(lines[0])
+        self.owner.assertEqual(lines[0], gate.canonical_json_bytes(response).decode("utf-8"))
+        return completed, response
+
+    def run_at_without_json(
+        self,
+        output: Path,
+        *,
+        fault_point: str,
+        exception_type: str,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        return self.run_at(
+            output,
+            fault_point=fault_point,
+            exception_type=exception_type,
+            _expect_json=False,
         )
-        audit = json.loads(audit_path.read_text(encoding="utf-8"))
-        return completed, audit, output
 
 
 class TestFrozenScience(unittest.TestCase):
@@ -236,6 +325,31 @@ class TestRealRunner(unittest.TestCase):
         self.assertNotIn("candidates", audit)
         self.assertNotIn("selected_candidate", audit)
 
+    def assert_minimal_invalid_package(
+        self,
+        completed: subprocess.CompletedProcess[str],
+        response: dict[str, object],
+        reason: str,
+    ) -> Path:
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertEqual(response["status"], gate.INVALID_STATUS)
+        self.assertEqual(response["reason_code"], reason)
+        self.assertTrue(response["package_written"])
+        package = Path(str(response["actual_package_path"]))
+        audit = json.loads((package / "audit.json").read_text(encoding="utf-8"))
+        self.assertEqual(audit["status"], gate.INVALID_STATUS)
+        self.assertFalse(audit["formal_result"])
+        self.assertFalse(audit["stage_progression_allowed"])
+        self.assertFalse(audit["science_metrics_present"])
+        self.assertEqual(audit["actual_package_path"], str(package))
+        for forbidden in ("candidate", "candidate_order", "candidates", "selected_candidate", "frontend", "readout"):
+            self.assertNotIn(forbidden, audit)
+        self.assertFalse((package / "frozen_frontend.json").exists())
+        self.assertFalse((package / "readout.json").exists())
+        self.assertEqual(set(path.name for path in package.iterdir()), {"audit.json", "command.txt", "checksums.sha256"})
+        return package
+
     def test_success_package_and_a1_short_circuit(self) -> None:
         harness = self.make_harness()
         completed, audit, output = harness.run()
@@ -256,6 +370,10 @@ class TestRealRunner(unittest.TestCase):
         self.assertTrue((output / "checksums.sha256").is_file())
         declared = {line.split("  ", 1)[1] for line in (output / "checksums.sha256").read_text(encoding="utf-8").splitlines()}
         self.assertEqual(declared, {"audit.json", "authorization_manifest.json", "command.txt", "config.json", "frozen_frontend.json", "readout.json"})
+        produced = np.asarray(json.loads((output / "readout.json").read_text(encoding="utf-8"))["coefficients"])
+        raw = good_features()
+        expected = gate.fit_readout([gate.transform(raw[dataset_id], "A1") for dataset_id in gate.FIT_IDS])
+        self.assertTrue(np.array_equal(produced, expected))
 
     def test_scientific_failure_uses_a1_then_a2_and_no_third_candidate(self) -> None:
         zeros = {dataset_id: np.zeros((13, 30)) for dataset_id in gate.PERMITTED_INPUT_IDS}
@@ -269,6 +387,147 @@ class TestRealRunner(unittest.TestCase):
         self.assertTrue(all(not item["development_evaluated"] for item in audit["candidates"]))
         self.assertFalse((output / "frozen_frontend.json").exists())
         self.assertFalse((output / "readout.json").exists())
+
+    def test_preexisting_targets_are_untouched_and_rejected_before_feature_access(self) -> None:
+        for kind in ("empty_dir", "nonempty_dir", "file", "symlink"):
+            with self.subTest(kind=kind):
+                harness = self.make_harness()
+                output = harness.root / f"preexisting-{kind}"
+                symlink_target = harness.root / "symlink-target.bin"
+                if kind == "empty_dir":
+                    output.mkdir()
+                elif kind == "nonempty_dir":
+                    output.mkdir()
+                    (output / "sentinel.bin").write_bytes(b"directory-sentinel")
+                elif kind == "file":
+                    output.write_bytes(b"file-sentinel")
+                else:
+                    symlink_target.write_bytes(b"symlink-target-sentinel")
+                    output.symlink_to(symlink_target)
+                inode_before = output.lstat().st_ino
+                bytes_before = (
+                    output.read_bytes()
+                    if kind == "file"
+                    else (symlink_target.read_bytes() if kind == "symlink" else None)
+                )
+                entries_before = (
+                    {path.name: path.read_bytes() for path in output.iterdir()}
+                    if kind in {"empty_dir", "nonempty_dir"}
+                    else None
+                )
+                # Missing inputs are a read sentinel: output ownership must win.
+                for path in harness.feature_paths.values():
+                    path.unlink()
+                completed, response = harness.run_at(output)
+                package = self.assert_minimal_invalid_package(completed, response, "OUTPUT_TARGET_EXISTS")
+                self.assertNotEqual(package, output)
+                self.assertEqual(output.lstat().st_ino, inode_before)
+                if kind == "file":
+                    self.assertEqual(output.read_bytes(), bytes_before)
+                elif kind == "symlink":
+                    self.assertTrue(output.is_symlink())
+                    self.assertEqual(symlink_target.read_bytes(), bytes_before)
+                else:
+                    self.assertEqual({path.name: path.read_bytes() for path in output.iterdir()}, entries_before)
+
+    def test_main_writer_fault_matrix_never_publishes_partial_success(self) -> None:
+        points = (
+            "main_staging_mkdir",
+            "main_audit_write",
+            "main_command_write",
+            "main_manifest_write",
+            "main_config_write",
+            "main_frontend_write",
+            "main_readout_write",
+            "main_checksum_write",
+            "main_checksum_self_check",
+            "main_publish",
+        )
+        for point in points:
+            with self.subTest(point=point):
+                harness = self.make_harness()
+                output = harness.root / f"fault-{point}"
+                completed, response = harness.run_at(output, fault_point=point)
+                package = self.assert_minimal_invalid_package(completed, response, "PACKAGE_WRITE_FAILED")
+                self.assertNotEqual(package, output)
+                self.assertFalse(output.exists())
+                self.assertFalse(any(path.name.startswith(".g0-package-staging-") for path in output.parent.iterdir()))
+
+    def test_main_publish_races_never_replace_competitor(self) -> None:
+        for kind in ("file", "empty_dir", "nonempty_dir"):
+            with self.subTest(kind=kind):
+                harness = self.make_harness()
+                output = harness.root / f"race-{kind}"
+                completed, response = harness.run_at(output, fault_point="main_publish_race", competitor_kind=kind)
+                self.assert_minimal_invalid_package(completed, response, "PACKAGE_WRITE_FAILED")
+                if kind == "file":
+                    self.assertEqual(output.read_bytes(), b"competitor-file")
+                elif kind == "empty_dir":
+                    self.assertTrue(output.is_dir())
+                    self.assertEqual(list(output.iterdir()), [])
+                else:
+                    self.assertEqual((output / "sentinel.bin").read_bytes(), b"competitor-directory")
+
+    def test_fallback_fault_matrix_is_nonrecursive_and_traceback_free(self) -> None:
+        points = (
+            "fallback_staging_mkdir",
+            "fallback_audit_write",
+            "fallback_command_write",
+            "fallback_checksum_write",
+            "fallback_publish",
+        )
+        for point in points:
+            with self.subTest(point=point):
+                harness = self.make_harness()
+                output = harness.root / f"fallback-fault-{point}"
+                output.write_bytes(b"owned-target")
+                completed, response = harness.run_at(output, fault_point=point)
+                self.assertEqual(completed.returncode, 2)
+                self.assertNotIn("Traceback", completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(response["status"], gate.INVALID_STATUS)
+                self.assertEqual(response["reason_code"], "INVALID_PACKAGE_WRITE_FAILED")
+                self.assertFalse(response["package_written"])
+                self.assertIsNone(response["actual_package_path"])
+                self.assertEqual(output.read_bytes(), b"owned-target")
+
+    def test_fallback_publish_race_uses_next_exclusive_sibling(self) -> None:
+        harness = self.make_harness()
+        output = harness.root / "fallback-race"
+        output.write_bytes(b"owned-target")
+        completed, response = harness.run_at(output, fault_point="fallback_publish_race", competitor_kind="nonempty_dir")
+        package = self.assert_minimal_invalid_package(completed, response, "OUTPUT_TARGET_EXISTS")
+        first = output.with_name(f"{output.name}.invalid.0001")
+        self.assertEqual((first / "sentinel.bin").read_bytes(), b"competitor-directory")
+        self.assertEqual(package, output.with_name(f"{output.name}.invalid.0002"))
+        self.assertEqual(output.read_bytes(), b"owned-target")
+
+    def test_unexpected_exception_types_are_wrapped_once_without_science(self) -> None:
+        for exception_type in ("OSError", "RuntimeError", "TypeError"):
+            with self.subTest(exception_type=exception_type):
+                harness = self.make_harness()
+                output = harness.root / f"unexpected-{exception_type}"
+                completed, response = harness.run_at(
+                    output,
+                    fault_point="before_evaluate",
+                    exception_type=exception_type,
+                )
+                package = self.assert_minimal_invalid_package(completed, response, "UNEXPECTED_RUNTIME_FAILURE")
+                audit = json.loads((package / "audit.json").read_text(encoding="utf-8"))
+                self.assertEqual(audit["exception_type"], exception_type)
+
+    def test_keyboard_interrupt_and_system_exit_are_not_swallowed(self) -> None:
+        for exception_type in ("KeyboardInterrupt", "SystemExit"):
+            with self.subTest(exception_type=exception_type):
+                harness = self.make_harness()
+                output = harness.root / f"interrupt-{exception_type}"
+                completed, _ = harness.run_at_without_json(
+                    output,
+                    fault_point="before_preflight",
+                    exception_type=exception_type,
+                )
+                self.assertNotEqual(completed.returncode, 2)
+                self.assertFalse(output.exists())
 
     def test_fake_cli_commit_is_rejected(self) -> None:
         harness = self.make_harness()
