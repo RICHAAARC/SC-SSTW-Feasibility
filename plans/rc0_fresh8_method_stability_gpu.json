@@ -1,0 +1,29 @@
+{
+  "schema": "sc_sstw_rc0_fresh8_method_stability_plan_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "base_source_count_before_run": 4,
+  "new_base_count": 8,
+  "fresh_content_count_after_run": 12,
+  "attempt_order": ["rigid_blocks", "elastic_membrane", "laminar_plumes", "granular_avalanche", "matte_balloon", "engraved_drum", "pendulum_bars", "soap_bubbles"],
+  "category_order": ["rigid", "nonrigid", "fluid", "particles", "low_texture", "high_texture", "periodic", "aperiodic"],
+  "attempt_budget": 8,
+  "artifact_per_attempt": "one_carrier_free_BASE_mp4",
+  "retry_policy": "no_retry_no_replacement_no_additional_sample",
+  "stop_on_failure": true,
+  "gpu_phase_outputs": ["eight_base_mp4", "audit_json", "config_json", "command_json", "checksums_sha256", "zip", "sidecar"],
+  "gpu_phase_forbidden": ["carrier", "hook", "manual_latent_decode", "detector", "phase_c", "result_tuning"],
+  "phase_c": {
+    "executed_by_this_notebook": false,
+    "per_base_clean_conditions": 4,
+    "per_base_transformed_products": 16,
+    "new_clean_total": 32,
+    "new_transformed_total": 128,
+    "new_artifact_total": 160,
+    "clean_semantics": "identity_only",
+    "transformed_semantics": "each_real_mp4_scored_against_its_own_transform_truth",
+    "expected_all_pass_counts": [16, 16, 64, 64],
+    "future_execution": "one_CPU_run_plus_independent_replay"
+  },
+  "formal_result": false,
+  "stage_progression_allowed": false
+}

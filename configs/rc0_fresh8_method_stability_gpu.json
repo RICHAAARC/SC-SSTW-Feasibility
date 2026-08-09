@@ -1,0 +1,127 @@
+{
+  "schema": "sc_sstw_rc0_fresh8_method_stability_gpu_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "purpose": "eight_additional_carrier_free_bases_for_fresh12_method_stability",
+  "attempt_order": ["rigid_blocks", "elastic_membrane", "laminar_plumes", "granular_avalanche", "matte_balloon", "engraved_drum", "pendulum_bars", "soap_bubbles"],
+  "attempt_budget": 8,
+  "retry_policy": "no_retry_no_replacement_no_additional_sample",
+  "groups": [
+    {
+      "group_id": "rigid_blocks",
+      "category": "rigid",
+      "content_grammar": "rigid_body_contact_and_translation",
+      "prompt": "locked side-view camera, three polished ceramic blocks slide and collide along a straight matte black rail, stable soft lighting, no text, no cuts, no camera motion",
+      "prompt_sha256": "e7add8ef5a91153b82f3075d59a67420276970a86fc411a811909e44f6f5839c",
+      "seed": 54011
+    },
+    {
+      "group_id": "elastic_membrane",
+      "category": "nonrigid",
+      "content_grammar": "continuous_elastic_surface_deformation",
+      "prompt": "locked overhead camera, a translucent elastic membrane develops broad traveling folds under steady diffuse light, plain navy background, no text, no cuts, no camera motion",
+      "prompt_sha256": "0eaa9c8f6a8528fc7a593a7ede42ac35c0be2be3231597f4c098323248edf4bd",
+      "seed": 54012
+    },
+    {
+      "group_id": "laminar_plumes",
+      "category": "fluid",
+      "content_grammar": "laminar_multiplume_advection",
+      "prompt": "locked macro camera, two laminar dye plumes curl through clear still oil around one fixed glass divider, stable backlight, no text, no cuts, no camera motion",
+      "prompt_sha256": "297f958dfc602342f72e69faca11710ae8f2d336b0796fe4ca2502e090f81714",
+      "seed": 54013
+    },
+    {
+      "group_id": "granular_avalanche",
+      "category": "particles",
+      "content_grammar": "many_particle_gravity_driven_transport",
+      "prompt": "locked top-down camera, thousands of pale grains avalanche through a fixed sparse peg lattice into shifting heaps, stable lighting, no text, no cuts, no camera motion",
+      "prompt_sha256": "104e1e91c278a4a67f320b35629b7a5160dfdfb073cefb667e1e202b8c8a16f6",
+      "seed": 54014
+    },
+    {
+      "group_id": "matte_balloon",
+      "category": "low_texture",
+      "content_grammar": "low_texture_smooth_scale_change",
+      "prompt": "locked front camera, a nearly uniform matte gray balloon slowly expands and contracts against a plain gray background, soft shadowless lighting, no text, no cuts, no camera motion",
+      "prompt_sha256": "8506cf8fc1c03cc1b79405a3cb189c14aa3fff77df8977424aaaf66f513763cd",
+      "seed": 54015
+    },
+    {
+      "group_id": "engraved_drum",
+      "category": "high_texture",
+      "content_grammar": "high_texture_rigid_surface_rotation",
+      "prompt": "locked close camera, a densely engraved ceramic drum rotates slowly beneath fixed grazing light, intricate high-frequency surface texture, no text, no cuts, no camera motion",
+      "prompt_sha256": "5ccff9bd9d465a554d09cd0eb1b7a4b948fa26c3af6a40856d41dc472e9639ed",
+      "seed": 54016
+    },
+    {
+      "group_id": "pendulum_bars",
+      "category": "periodic",
+      "content_grammar": "strict_periodic_multiobject_oscillation",
+      "prompt": "locked side camera, three luminous pendulum bars oscillate in a synchronized repeating rhythm against black velvet, stable exposure, no text, no cuts, no camera motion",
+      "prompt_sha256": "df4febfbbf49bb4f487d87be851954cce5d210fbe79c35cfb180bc50ba1ab2f7",
+      "seed": 54017
+    },
+    {
+      "group_id": "soap_bubbles",
+      "category": "aperiodic",
+      "content_grammar": "aperiodic_topology_change",
+      "prompt": "locked overhead camera, several translucent soap bubbles merge and separate in an irregular nonrepeating sequence on a dark liquid surface, stable lighting, no text, no cuts, no camera motion",
+      "prompt_sha256": "7d5e7b697490eaeadc4a7a4a039bdad8a2159586027c8438017454c3cc226de9",
+      "seed": 54018
+    }
+  ],
+  "model": {
+    "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"
+  },
+  "generation": {
+    "pipeline": "diffusers.WanPipeline",
+    "decode_path": "official_pipeline_default_output_no_manual_latent_decode",
+    "scheduler": "WanPipeline_frozen_default_for_revision",
+    "sampler": "WanPipeline_frozen_default_for_revision",
+    "inference_steps": 8,
+    "guidance_scale": 5.0,
+    "height": 320,
+    "width": 512,
+    "frame_count": 49,
+    "fps": 8,
+    "dtype": "torch.bfloat16",
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple scenes, flicker",
+    "carrier": "none",
+    "hook": "none"
+  },
+  "encoding": {
+    "call": "diffusers.utils.export_to_video",
+    "container": "mp4",
+    "codec": "h264",
+    "pixel_format": "yuv420p",
+    "quality": 5.0,
+    "bitrate": null,
+    "macro_block_size": 16
+  },
+  "phase_c_frozen_not_executed": {
+    "prior_fresh4_source_commit": "dc7b089837d50fcfb5ab916ac3739e065dfc3d50",
+    "new_base_count": 8,
+    "conditions_per_base": ["OFF_R1", "OFF_R2", "A", "B"],
+    "transforms": ["identity", "delete6_duplicate12", "local_phase_plus1", "local_phase_minus1"],
+    "derived_clean_count": 32,
+    "derived_transformed_count": 128,
+    "derived_total_count": 160,
+    "carrier": "frozen_pixel_chroma_6_over_255",
+    "detector": "frozen_target_only_blind_observation_e0744c8",
+    "capture": "frozen_AISB_K8",
+    "calibration": "frozen_candidate_wise_K2_1",
+    "phase_recovery": "frozen_dynamic_time_sync",
+    "corrected_semantics": "clean_identity_only_transformed_each_own_truth",
+    "success_counts": {
+      "clean_off_reject": 16,
+      "clean_positive_accept": 16,
+      "transformed_off_reject": 64,
+      "transformed_positive_accept": 64
+    },
+    "execution": "future_CPU_only_after_GPU_base_delivery"
+  },
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
