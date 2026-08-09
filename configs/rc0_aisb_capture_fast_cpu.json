@@ -1,0 +1,52 @@
+{
+  "schema": "sc_sstw_rc0_aisb_capture_fast_cpu_v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "question": "step3_affine_invariant_capture_places_own_schedule_start0_in_finite_candidate_set",
+  "input": {
+    "closure_commit": "dff72dadb57e5e732f27b22a6497afcac67da850",
+    "closure_tree": "b32f14cda2deb0793f28060049631bb45f2ee370",
+    "evaluation_audit_path": "/home/richar/projects/SC-SSTW-Feasibility-diagnostic-runs/rc0-pixel-chroma-fast-cpu-9e19d31-run1/evaluation-only-result/audit.json",
+    "evaluation_audit_sha256": "9b08c88aad5378c2b0c94574585906e96a9608d094002248fddd6761b5e1dead",
+    "video_source": "redecode_the_eight_SHA_bound_saved_mp4_artifacts_then_recompute_frozen_30D",
+    "paired_difference": "F(condition)-0.5*(F(OFF_R1)+F(OFF_R2))",
+    "training": "forbidden"
+  },
+  "capture": {
+    "implementation": "sc_sstw_feasibility.aisb.scan_burst_candidates",
+    "invariant": "affine_burst_residual_v1",
+    "residual": "checksum_squared_error_for_template_indices_3_4_5_predicted_by_barycentric_weights_from_anchors_0_1_2_divided_by_total_six_point_scatter_plus_1e-9",
+    "templates": ["A_first_six_points", "B_first_six_points"],
+    "template_order": ["A", "B"],
+    "observed_length": 6,
+    "start_indices": [0, 1, 2, 3, 4, 5, 6, 7],
+    "candidate_universe_size": 16,
+    "candidate_universe": "A_and_B_at_each_of_8_starts",
+    "top_k_per_start": 1,
+    "candidate_budget_K": 8,
+    "candidate_budget_derivation": "8_starts_times_existing_top_k_per_start_1",
+    "pruning": "at_each_start_retain_only_the_lower_residual_of_A_and_B",
+    "acceptance_threshold": null,
+    "tie_rule": "residual_ascending_then_stable_template_order_A_before_B;report_order_residual_start_template",
+    "truth": "own_template_start0",
+    "negatives": "cross_template_and_all_wrong_starts",
+    "all_pass": "every_group_times_condition_times_perturbation_case_has_own_start0_beat_cross_start0_and_enter_K"
+  },
+  "time_perturbations": [
+    {
+      "id": "identity",
+      "formula": "unchanged_13_point_paired_matrix"
+    },
+    {
+      "id": "private_tail_delete6_duplicate12",
+      "formula": "delete_original_index6_then_append_one_extra_copy_of_original_index12",
+      "length_before": 13,
+      "length_after": 13,
+      "truth_window_effect": "indices0_through5_unchanged_at_start0",
+      "prior": "existing_private_frame_deletion_and_duplication_edit_semantics"
+    }
+  ],
+  "outcomes": ["FEASIBLE", "NOT_FEASIBLE", "INSUFFICIENT_TO_DECIDE"],
+  "feasible_route": "PROCEED_STEP4_SELF_CALIBRATION_CPU",
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
