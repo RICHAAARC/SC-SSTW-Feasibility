@@ -7,6 +7,10 @@
 > 当前推进位置：`S0 -> S1`  
 > 权威性：本文件是 SSTW 方法身份、实现边界、验证路线与证据解释的唯一权威定义。任何代码、配置、历史实验、笔记本或讨论若与本文件冲突，只能作为历史实现或失败诊断，不得改变 SSTW 方法身份。
 
+## 项目推进第一性原则
+
+项目推进的唯一目的是验证冻结 SSTW 机制链：S0 construction、S1 真实 DiT relation、S2 saved-MP4 二维观察、S3 AISB/校准/Viterbi，以及 S4 极小样本盲检。不要求且禁止独立审计、各种 Gate、manifest/result gate、provenance/receipt/authorization、环境身份冻结、论文固定 FPR、大样本攻击、复现实验治理、claim ceiling，以及为未来正式实验建设基础设施。只允许为避免代码或接线错误被误判为科学结果而进行最小正确性检查。model revision、真实 relation interface、B1/B2、lambda、Flow support 和结果前冻结 construction 属于被测方法定义并必须保留；torch/CUDA/GPU 名称只作诊断记录，不作身份门。所有证据均为 `DIAGNOSTIC_ONLY`。
+
 ---
 
 ## 1. 唯一研究问题与正式检测边界

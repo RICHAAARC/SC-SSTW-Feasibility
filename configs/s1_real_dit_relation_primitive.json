@@ -3,21 +3,21 @@
   "diagnostic_class": "DIAGNOSTIC_ONLY",
   "authority": {
     "path": "SSTW_METHOD_AUTHORITY.md",
-    "raw_sha256": "1a7d9b23e19f3414f400524e150bcaff3aad05ceab2193a44769fede0673430c"
+    "raw_sha256": "a34cad7f174ab8103ac7c54795393164f1ed74e559927da1198e18abb8836d18"
+  },
+  "runtime_capabilities": {
+    "cuda_available": true,
+    "bf16_supported": true
   },
   "model": {
     "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     "revision": "0fad780a534b6463e45facd96134c9f345acfa5b",
     "pipeline": "diffusers.WanPipeline",
     "transformer": "diffusers.WanTransformer3DModel",
-    "dtype": "torch.bfloat16",
-    "required_gpu": "NVIDIA L4",
-    "required_cuda_bf16": true
+    "dtype": "torch.bfloat16"
   },
   "software": {
     "python": "3.11",
-    "torch": "2.6.0+cu124",
-    "cuda": "12.4",
     "accelerate": "1.4.0",
     "diffusers": "0.35.2",
     "ftfy": "6.3.1",

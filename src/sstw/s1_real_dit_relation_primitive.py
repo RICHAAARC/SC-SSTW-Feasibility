@@ -208,6 +208,23 @@ def _extract_velocity_slice(value: Any) -> Any:
     return torch.stack(slices, dim=0).detach().float().cpu()
 
 
+def runtime_capability_diagnostics(torch: Any) -> dict[str, Any]:
+    """Require only the CUDA and BF16 capabilities used by the S1 construction."""
+
+    cuda_available = bool(torch.cuda.is_available())
+    bf16_supported = bool(cuda_available and torch.cuda.is_bf16_supported())
+    diagnostics = {
+        "cuda_available": cuda_available,
+        "bf16_supported": bf16_supported,
+        "torch": str(torch.__version__),
+        "cuda": None if torch.version.cuda is None else str(torch.version.cuda),
+        "gpu": None if not cuda_available else str(torch.cuda.get_device_name(0)),
+    }
+    if not cuda_available or not bf16_supported:
+        raise S1InstrumentationError("S1 requires CUDA and BF16 capabilities")
+    return diagnostics
+
+
 def _load_runtime(config: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
     try:
         import accelerate, diffusers, ftfy, huggingface_hub, safetensors, torch, transformers
@@ -215,23 +232,23 @@ def _load_runtime(config: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
         from huggingface_hub import snapshot_download
     except Exception as exc:
         raise S1InstrumentationError("locked S1 CUDA dependencies unavailable") from exc
-    software = config["software"]
-    versions = {
+    locked_software = config["software"]
+    software_diagnostics = {
         "python": f"{platform.python_version_tuple()[0]}.{platform.python_version_tuple()[1]}",
-        "torch": torch.__version__, "cuda": torch.version.cuda,
         "accelerate": accelerate.__version__, "diffusers": diffusers.__version__, "ftfy": ftfy.__version__,
         "huggingface_hub": huggingface_hub.__version__, "numpy": np.__version__,
         "safetensors": safetensors.__version__, "transformers": transformers.__version__,
     }
-    if versions != software:
-        raise S1InstrumentationError(f"locked software identity mismatch: {versions}")
+    if software_diagnostics != locked_software:
+        raise S1InstrumentationError(f"locked method dependency mismatch: {software_diagnostics}")
+    runtime_capabilities = runtime_capability_diagnostics(torch)
+    if config.get("runtime_capabilities") != {"cuda_available": True, "bf16_supported": True}:
+        raise S1InstrumentationError("S1 runtime capability definition changed")
     transformer_source = Path(inspect.getsourcefile(WanTransformer3DModel) or "").resolve(strict=True)
     pipeline_source = Path(inspect.getsourcefile(WanPipeline) or "").resolve(strict=True)
     topology = config["source_topology"]
     if sha256_file(transformer_source) != topology["transformer_wan_raw_sha256"] or sha256_file(pipeline_source) != topology["pipeline_wan_raw_sha256"]:
         raise S1InstrumentationError("installed diffusers Wan source identity mismatch")
-    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported() or torch.cuda.get_device_name(0) != config["model"]["required_gpu"]:
-        raise S1InstrumentationError("exact NVIDIA L4 BF16 runtime unavailable")
     snapshot = Path(snapshot_download(repo_id=config["model"]["id"], revision=config["model"]["revision"], local_files_only=True))
     resolved = snapshot.resolve(strict=True)
     if snapshot.is_symlink() or not snapshot.is_dir() or resolved.name != config["model"]["revision"]:
@@ -251,7 +268,7 @@ def _load_runtime(config: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
         or str(transformer.dtype) != config["model"]["dtype"]
     ):
         raise S1InstrumentationError("real Wan transformer structure mismatch")
-    runtime = {**versions, "gpu": torch.cuda.get_device_name(0), "model_snapshot": str(resolved),
+    runtime = {**software_diagnostics, **runtime_capabilities, "model_snapshot": str(resolved),
                "transformer_type": type(transformer).__name__, "block_type": type(transformer.blocks[14]).__name__,
                "attention_type": type(target).__name__, "execution_device": str(pipe._execution_device),
                "transformer_source": str(transformer_source), "transformer_source_sha256": sha256_file(transformer_source),

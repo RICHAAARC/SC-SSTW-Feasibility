@@ -26,6 +26,8 @@ from sstw.s1_real_dit_relation_primitive import (
     LAYER_ORDER,
     evaluate_preregistered_statistics,
     load_frozen_inputs,
+    runtime_capability_diagnostics,
+    S1InstrumentationError,
 )
 
 
@@ -34,8 +36,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_authority_config_conditions_and_exact20_are_frozen() -> None:
     authority = ROOT / "SSTW_METHOD_AUTHORITY.md"
-    assert hashlib.sha256(authority.read_bytes()).hexdigest() == "1a7d9b23e19f3414f400524e150bcaff3aad05ceab2193a44769fede0673430c"
+    assert hashlib.sha256(authority.read_bytes()).hexdigest() == "a34cad7f174ab8103ac7c54795393164f1ed74e559927da1198e18abb8836d18"
+    authority_text = authority.read_text(encoding="utf-8")
+    assert authority_text.count("## 项目推进第一性原则") == 1
+    assert "所有证据均为 `DIAGNOSTIC_ONLY`" in authority_text
     config, plan = load_frozen_inputs(ROOT)
+    assert config["runtime_capabilities"] == {"cuda_available": True, "bf16_supported": True}
+    assert "required_gpu" not in config["model"] and "required_cuda_bf16" not in config["model"]
+    assert "torch" not in config["software"] and "cuda" not in config["software"]
     assert config["conditions"] == list(CONDITION_ORDER)
     assert config["call_budget"] == {
         "prefix_steps": [0, 1, 2, 3], "prefix_branches": ["cond", "uncond"],
@@ -50,6 +58,84 @@ def test_authority_config_conditions_and_exact20_are_frozen() -> None:
     }
     assert config["generation"]["prompt"] == "locked camera, dark matte background, a single bright white cube moving slowly across the center, simple studio lighting, no text, no cuts"
     assert config["generation"]["seed"] == 1275
+
+
+def test_method_construction_and_plan_have_zero_drift() -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    method_keys = (
+        "model", "source_topology", "generation", "transformer_identity", "flow_support",
+        "relation_basis", "conditions", "condition_axes", "call_budget",
+        "response_definitions", "thresholds", "outcomes", "formal_result",
+        "stage_progression_allowed",
+    )
+    frozen_method = {key: config[key] for key in method_keys}
+    digest = hashlib.sha256(
+        json.dumps(frozen_method, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
+    assert digest == "9ca66eb07aa9bc5468e04e1c7a212a000cb14650d959a4c17f7b80fd51c0e7c3"
+    assert hashlib.sha256((ROOT / "plans/s1_real_dit_relation_primitive.json").read_bytes()).hexdigest() == "1de73796528c574ba9e8502824cbbb9ee495cbcf1e8f35dcd78642a99dce96e7"
+
+
+class _FakeCuda:
+    def __init__(self, *, available: bool, bf16: bool, name: str) -> None:
+        self.available = available
+        self.bf16 = bf16
+        self.name = name
+
+    def is_available(self) -> bool:
+        return self.available
+
+    def is_bf16_supported(self) -> bool:
+        return self.bf16
+
+    def get_device_name(self, _index: int) -> str:
+        return self.name
+
+
+class _FakeTorch:
+    class version:
+        cuda = "13.7-diagnostic"
+
+    __version__ = "2.99.0+future"
+
+    def __init__(self, *, available: bool, bf16: bool, name: str) -> None:
+        self.cuda = _FakeCuda(available=available, bf16=bf16, name=name)
+
+
+def test_runtime_gate_is_capability_only_and_keeps_environment_diagnostic() -> None:
+    torch = _FakeTorch(available=True, bf16=True, name="Arbitrary Future GPU")
+    assert runtime_capability_diagnostics(torch) == {
+        "cuda_available": True,
+        "bf16_supported": True,
+        "torch": "2.99.0+future",
+        "cuda": "13.7-diagnostic",
+        "gpu": "Arbitrary Future GPU",
+    }
+    with pytest.raises(S1InstrumentationError, match="CUDA and BF16"):
+        runtime_capability_diagnostics(_FakeTorch(available=False, bf16=True, name="CPU"))
+    with pytest.raises(S1InstrumentationError, match="CUDA and BF16"):
+        runtime_capability_diagnostics(_FakeTorch(available=True, bf16=False, name="Any GPU"))
+
+
+def test_production_runtime_and_notebook_have_no_exact_environment_blocker() -> None:
+    paths = (
+        ROOT / "configs/s1_real_dit_relation_primitive.json",
+        ROOT / "src/sstw/s1_real_dit_relation_primitive.py",
+        ROOT / "notebooks/sstw_s1_real_dit_relation_primitive.ipynb",
+    )
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    for forbidden in ("NVIDIA L4", "2.6.0+cu124", "CUDA 12.4", '"12.4"', "'12.4'"):
+        assert forbidden not in combined
+    notebook = json.loads(paths[-1].read_text(encoding="utf-8"))
+    code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
+    assert code_cells[0]["source"] == [
+        "from google.colab import drive\n",
+        "drive.mount('/content/drive')\n",
+    ]
+    code = "".join("".join(cell["source"]) for cell in code_cells)
+    assert "torch.cuda.is_available()" in code and "torch.cuda.is_bf16_supported()" in code
+    assert "diffusers==0.35.2" in code
+    assert "0fad780a534b6463e45facd96134c9f345acfa5b" in code
 
 
 def test_frozen_geometry_has_13_queries_two_orthogonal_unit_pairs() -> None:
