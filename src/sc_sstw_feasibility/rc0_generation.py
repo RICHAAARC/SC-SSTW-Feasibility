@@ -302,6 +302,7 @@ def _load_production_pipeline(wan_pipeline: Any, torch: Any, resolved_snapshot: 
         local_files_only=True,
     )
     pipe.enable_model_cpu_offload()
+    pipe.vae.enable_tiling()
     if not str(pipe._execution_device).startswith("cuda"):
         raise RC0GenerationError("Wan CPU offload did not retain a CUDA execution device")
     return pipe

@@ -937,7 +937,7 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     execution_enabled = "AUTHORIZE_EXECUTION = True" in source
     drive_enabled = "AUTHORIZE_DRIVE_IO = True" in source
     assert execution_enabled is drive_enabled
-    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility/rc0-diag-vae-latent-oom-repair'" in source
+    assert "DRIVE_OUTPUT_ROOT = '/content/drive/MyDrive/SC-SSTW-Feasibility/rc0-diag-vae-latent-tiling'" in source
     assert "'--generate'" in source
     assert "'--diagnostic-bootstrap'" in source
     assert "MANIFEST_PATH" not in source
@@ -969,8 +969,8 @@ def test_notebook_is_thin_exact_ref_generate_only_and_failure_safe() -> None:
     assert "_require_absent([DRIVE_ARCHIVE, DRIVE_SIDECAR])" in execution_source
     assert "Path('/content/drive') not in drive_root.parents" in execution_source
     assert execution_source.count("completed = subprocess.run(argv") == 1
-    assert execution_source.index("try:\n") < execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-OOM-REPAIR:' + AUTHORIZED_REF)")
-    assert execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-OOM-REPAIR:' + AUTHORIZED_REF)") < execution_source.index("git', 'clone'")
+    assert execution_source.index("try:\n") < execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-TILING:' + AUTHORIZED_REF)")
+    assert execution_source.index("RUN_ID = hashlib.sha256(('RC0-DIAG-VAE-LATENT-TILING:' + AUTHORIZED_REF)") < execution_source.index("git', 'clone'")
     assert execution_source.index("git', 'clone'") < execution_source.index("snapshot_download(")
     assert "'diagnostic_class': DIAGNOSTIC_CLASS" in execution_source
     assert "'authorization_claimed': False" in execution_source
@@ -1148,16 +1148,24 @@ def test_diag_fast_exact8_and_frozen_carrier_sanity() -> None:
 
 
 def test_production_pipeline_uses_single_cpu_offload_policy() -> None:
+    calls: list[str] = []
+
+    class FakeVAE:
+        def enable_tiling(self) -> None:
+            calls.append("tiling")
+
     class FakePipe:
         def __init__(self) -> None:
             self.offload_enabled = False
+            self.vae = FakeVAE()
 
         def enable_model_cpu_offload(self) -> None:
             self.offload_enabled = True
+            calls.append("offload")
 
         @property
         def _execution_device(self) -> str:
-            assert self.offload_enabled
+            assert self.offload_enabled and calls == ["offload", "tiling"]
             return "cuda:0"
 
     class FakeWanPipeline:
@@ -1174,10 +1182,20 @@ def test_production_pipeline_uses_single_cpu_offload_policy() -> None:
     snapshot = Path("/tmp/frozen-wan-snapshot")
     pipe = _load_production_pipeline(FakeWanPipeline, FakeTorch, snapshot)
     assert pipe.offload_enabled is True
+    assert calls == ["offload", "tiling"]
     assert FakeWanPipeline.call == (str(snapshot), FakeTorch.bfloat16, True)
     generation_source = (ROOT / "src/sc_sstw_feasibility/rc0_generation.py").read_text()
     assert "pipe.enable_model_cpu_offload()" in generation_source
+    assert "pipe.vae.enable_tiling()" in generation_source
+    assert generation_source.index("pipe.enable_model_cpu_offload()") < generation_source.index("pipe.vae.enable_tiling()")
     assert '.to("cuda")' not in generation_source and ".to('cuda')" not in generation_source
+    assert "enable_slicing" not in generation_source
+    assert "enable_tiling(" not in generation_source.replace("enable_tiling()", "")
+    forbidden_tile_options = ("tile_sample_min_height", "tile_sample_min_width", "tile_sample_stride_height", "tile_sample_stride_width")
+    runner_source = (ROOT / RUNNER_PATH).read_text()
+    notebook_source = (ROOT / NOTEBOOK_PATH).read_text()
+    diagnostic_config = (ROOT / DIAGNOSTIC_CONFIG_PATH).read_text()
+    assert not any(option in generation_source or option in runner_source or option in notebook_source or option in diagnostic_config for option in forbidden_tile_options)
     assert "pipe._execution_device" in generation_source
     assert 'output_type="latent"' in generation_source
     assert "construct_final_latent_relation_residual(final_latent, schedule, carrier)" in generation_source
