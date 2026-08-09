@@ -1,0 +1,140 @@
+{
+  "schema": "sstw.s1.real_dit_relation_primitive.v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "authority": {
+    "path": "SSTW_METHOD_AUTHORITY.md",
+    "raw_sha256": "1a7d9b23e19f3414f400524e150bcaff3aad05ceab2193a44769fede0673430c"
+  },
+  "model": {
+    "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b",
+    "pipeline": "diffusers.WanPipeline",
+    "transformer": "diffusers.WanTransformer3DModel",
+    "dtype": "torch.bfloat16",
+    "required_gpu": "NVIDIA L4",
+    "required_cuda_bf16": true
+  },
+  "software": {
+    "python": "3.11",
+    "torch": "2.6.0+cu124",
+    "cuda": "12.4",
+    "accelerate": "1.4.0",
+    "diffusers": "0.35.2",
+    "ftfy": "6.3.1",
+    "huggingface_hub": "0.35.3",
+    "numpy": "1.26.4",
+    "safetensors": "0.5.3",
+    "transformers": "4.49.0"
+  },
+  "source_topology": {
+    "diffusers_wheel_sha256": "d50d5e74fdd6dcf55e5c1d304bc52cc7c2659abd1752740d736d7b54078b4db5",
+    "transformer_wan_path": "diffusers/models/transformers/transformer_wan.py",
+    "transformer_wan_raw_sha256": "e1dbc8ae21c27555417f71fa9fdbd2e547bd040ad1f76659a454d5600416aec0",
+    "pipeline_wan_path": "diffusers/pipelines/wan/pipeline_wan.py",
+    "pipeline_wan_raw_sha256": "7ff264fb08d5d5aa18519199aa24f59b844415fa70b650330688e1a824dc3e0c",
+    "processor_class": "WanAttnProcessor",
+    "relation_callsite": "transformer.blocks[14].attn1.processor",
+    "path_order": ["to_q_to_k_to_v", "norm_q_norm_k", "unflatten_heads", "apply_rotary_embedding", "scaled_attention_logits", "softmax", "value_aggregation", "to_out"]
+  },
+  "generation": {
+    "prompt": "locked camera, dark matte background, a single bright white cube moving slowly across the center, simple studio lighting, no text, no cuts",
+    "prompt_source_git_object": "50f8b7233d03c545f690492c2c72067950284c7d:configs/gpu_carrier_propagation_v1.json",
+    "seed": 1275,
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple subjects, flicker",
+    "guidance_scale": 5.0,
+    "inference_steps": 8,
+    "height": 320,
+    "width": 512,
+    "frame_count": 49,
+    "output": "internal_stats_only_no_scheduler_after_probe_no_VAE_no_MP4"
+  },
+  "transformer_identity": {
+    "block_count": 30,
+    "block_index": 14,
+    "block_index_formula": "floor((30-1)/2)",
+    "head_count": 12,
+    "head_dim": 128,
+    "inner_dim": 1536,
+    "patch_size": [1, 2, 2],
+    "latent_shape": [1, 16, 13, 40, 64],
+    "token_grid": [13, 20, 32],
+    "token_count": 8320,
+    "token_order": "index=((t*20)+h)*32+w"
+  },
+  "flow_support": {
+    "scheduler_index": 4,
+    "expected_timestep": 749,
+    "support": [4],
+    "lambda": 1.0,
+    "inject_cond_branch": true,
+    "inject_uncond_branch": true
+  },
+  "relation_basis": {
+    "target_query_grid": [[0,10,16],[1,10,16],[2,10,16],[3,10,16],[4,10,16],[5,10,16],[6,10,16],[7,10,16],[8,10,16],[9,10,16],[10,10,16],[11,10,16],[12,10,16]],
+    "target_query_indices": [336,976,1616,2256,2896,3536,4176,4816,5456,6096,6736,7376,8016],
+    "B1": {
+      "name": "horizontal_local_antisymmetric_pair",
+      "key_offsets": [[0,0,-1],[0,0,1]],
+      "key_indices": [[335,337],[975,977],[1615,1617],[2255,2257],[2895,2897],[3535,3537],[4175,4177],[4815,4817],[5455,5457],[6095,6097],[6735,6737],[7375,7377],[8015,8017]],
+      "coefficients": [0.7071067811865476,-0.7071067811865476],
+      "l2_norm": 1.0
+    },
+    "B2": {
+      "name": "vertical_local_antisymmetric_pair",
+      "key_offsets": [[0,-1,0],[0,1,0]],
+      "key_indices": [[304,368],[944,1008],[1584,1648],[2224,2288],[2864,2928],[3504,3568],[4144,4208],[4784,4848],[5424,5488],[6064,6128],[6704,6768],[7344,7408],[7984,8048]],
+      "coefficients": [0.7071067811865476,-0.7071067811865476],
+      "l2_norm": 1.0
+    },
+    "basis_inner_product": 0.0,
+    "allowed_changed_logits_per_target_row": 4,
+    "dense_bias_forbidden": true
+  },
+  "conditions": ["OFF_R1","OFF_R2","PLUS_B1","MINUS_B1","PLUS_B2","MINUS_B2"],
+  "condition_axes": {
+    "OFF_R1": [0.0,0.0],
+    "OFF_R2": [0.0,0.0],
+    "PLUS_B1": [1.0,0.0],
+    "MINUS_B1": [-1.0,0.0],
+    "PLUS_B2": [0.0,1.0],
+    "MINUS_B2": [0.0,-1.0]
+  },
+  "call_budget": {
+    "prefix_steps": [0,1,2,3],
+    "prefix_branches": ["cond","uncond"],
+    "prefix_transformer_calls": 8,
+    "probe_step": 4,
+    "probe_conditions": 6,
+    "probe_branches": ["cond","uncond"],
+    "probe_transformer_calls": 12,
+    "total_transformer_calls": 20,
+    "scheduler_steps_executed": 4,
+    "retry_count": 0
+  },
+  "response_definitions": {
+    "O": "(Y_plus-Y_minus)/2",
+    "E": "(Y_plus+Y_minus)/2-(Y_OFF_R1+Y_OFF_R2)/2",
+    "N": "(Y_OFF_R1-Y_OFF_R2)/sqrt(2)",
+    "R": "13x12x2 per-head target-row attention-probability contrasts for the two frozen key pairs",
+    "H": "13x1536 block-14 output target-query rows",
+    "V": "13x16x2x2 transformer velocity patches mapped from target queries"
+  },
+  "thresholds": {
+    "lambda_zero_relative_rms_maximum": 0.001,
+    "lambda_zero_max_bfloat16_ulp": 8.0,
+    "odd_to_noise_or_ulp_minimum": 8.0,
+    "even_to_odd_strict_maximum": 0.25,
+    "axis_absolute_cosine_strict_maximum": 0.5,
+    "axis_gain_ratio_inclusive": [0.25,4.0],
+    "relation_jacobian_cross_ratio_inclusive_maximum": 0.25,
+    "relation_jacobian_diagonal_sign": "positive",
+    "temporal_total_variation_strict_maximum": 0.10,
+    "block_global_relative_rms_strict_maximum": 0.01,
+    "velocity_global_relative_rms_strict_maximum": 0.01,
+    "finite_required": true,
+    "threshold_source": "predeclared_S1_engineering_separation_and_quality_budget_not_paper_evidence"
+  },
+  "outcomes": ["S1_GO","S1_NO_GO_THIS_CONSTRUCTION","INSTRUMENTATION_INSUFFICIENT"],
+  "formal_result": false,
+  "stage_progression_allowed": false
+}

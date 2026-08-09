@@ -1,0 +1,27 @@
+{
+  "schema": "sstw.s1.real_dit_relation_primitive.plan.v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "stage": "S0_to_S1_only",
+  "sequence": [
+    "validate_exact_source_model_runtime_and_scheduler",
+    "prepare_prompt_embeddings_and_one_initial_latent",
+    "run_prefix_step0_cond_uncond_then_scheduler",
+    "run_prefix_step1_cond_uncond_then_scheduler",
+    "run_prefix_step2_cond_uncond_then_scheduler",
+    "run_prefix_step3_cond_uncond_then_scheduler",
+    "verify_probe_scheduler_index4_timestep749",
+    "verify_lambda0_sparse_recompute_equivalence",
+    "fork_same_step4_latent_to_six_conditions",
+    "run_each_condition_cond_then_uncond_without_scheduler_step",
+    "compute_branch_layer_axis_O_E_N_and_all_preregistered_gates",
+    "publish_internal_stats_only"
+  ],
+  "condition_order": ["OFF_R1","OFF_R2","PLUS_B1","MINUS_B1","PLUS_B2","MINUS_B2"],
+  "branch_order": ["cond","uncond"],
+  "exact_transformer_calls": 20,
+  "retry_policy": "no_retry_no_scan_no_replacement",
+  "outputs": ["audit.json","stats.json","config.json","plan.json","command.json","checksums.sha256"],
+  "forbidden": ["scheduler_step_after_probe","VAE_decode","MP4_encode","S2","S3","S4","observer","AISB","equalizer","Viterbi","output_hook","output_residual","latent_carrier","pixel_carrier"],
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
