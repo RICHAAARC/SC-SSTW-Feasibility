@@ -87,6 +87,34 @@ execution packages are admitted solely in explicit `--synthetic-fixture` mode
 and remain nonformal, test-only evidence. The formal notebook invokes only
 `--generate`; it has no external production-package topology.
 
+### Receipt authority threat boundary
+
+The receipt authority is intentionally limited. It must reject external CLI or
+package input, ordinary import/getattr access to an issuer, JSON/mapping/pickle
+or ordinary-object reconstruction, CPU-harness relabelling, receipt copying or
+replay, field mutation, and self-signed or re-signed disk packages. Its trust
+prerequisites are an exactly authorized clean source tree, the fixed CLI
+`--generate` control flow, and generation plus validation in one controlled
+runner process.
+
+The authority's issuer and active registry are closure-local. The module does
+not export an issuer, snapshot factory, mapping constructor, or receipt
+deserializer. The registry, rather than receipt fields or a device string,
+freezes whether the observed branch was `production_generation` or
+`cpu_test_harness`. The latter remains test-only even if a test adapter returns
+CUDA-like strings or production labels. It is written and validated under the
+separate `cpu_test_harness_saved_mp4` evidence mode; only authority-class
+`production_generation` may use `production_saved_mp4`.
+
+This boundary does not attempt to resist arbitrary code execution already
+inside the authorized Python process, explicit closure/cell reflection,
+monkeypatching, direct memory modification, or debugger injection. Those are
+declared limitations, not properties tested by this preparation package. A
+future requirement to resist them would need a separately authorized boundary
+such as OS process isolation plus an independently held signing secret, or an
+external hardware-backed origin mechanism. Those mechanisms are outside this
+scientific-feasibility preparation and are not implemented here.
+
 ### Blind evaluator
 
 The frozen selected frontend/readout maps each single saved MP4 to one 13×2

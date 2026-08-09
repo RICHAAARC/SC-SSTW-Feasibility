@@ -99,8 +99,10 @@ THRESHOLD_KEYS = tuple(G0_ABSOLUTE_THRESHOLDS)
 ARTIFACT_NAMES = ("video", "features", "stdout", "stderr", "config", "environment", "command", "integrity")
 EVIDENCE_PRODUCTION = "production_saved_mp4"
 EVIDENCE_SYNTHETIC = "test_only_synthetic"
+EVIDENCE_CPU_HARNESS = "cpu_test_harness_saved_mp4"
 PRODUCTION_EVIDENCE_SCHEMA = "sc_sstw_rc1_execution_production_saved_mp4_v1"
 SYNTHETIC_EVIDENCE_SCHEMA = "sc_sstw_rc1_execution_test_only_synthetic_v1"
+CPU_HARNESS_EVIDENCE_SCHEMA = "sc_sstw_rc1_execution_cpu_test_harness_saved_mp4_v1"
 FEATURE_CACHE_SCHEMA = "sc_sstw_rc1_feature_cache_v1"
 FEATURE_EXTRACTOR_ID = "sc_sstw_learned_observation_saved_mp4_13x30_v1"
 FEATURE_CACHE_ATOL = 1e-12
@@ -638,12 +640,17 @@ def condition_config_payload(preflight_result: Preflight, group: Mapping[str, An
 
 
 def command_artifact_payload(preflight_result: Preflight, evidence_mode: str) -> dict[str, Any]:
+    action = {
+        EVIDENCE_PRODUCTION: "generate",
+        EVIDENCE_CPU_HARNESS: "cpu_test_harness_generate",
+        EVIDENCE_SYNTHETIC: "validate_test_only_synthetic_execution",
+    }[evidence_mode]
     return {
         "schema_version": 1,
         "artifact_schema": "sc_sstw_rc1_execution_command_v1",
         "evidence_mode": evidence_mode,
         "runner": RUNNER_PATH,
-        "action": "generate" if evidence_mode == EVIDENCE_PRODUCTION else "validate_test_only_synthetic_execution",
+        "action": action,
         "source_commit": preflight_result.source_state.head,
         "manifest_sha256": sha256_bytes(preflight_result.manifest_bytes),
         "synthetic_fixture_authorized": evidence_mode == EVIDENCE_SYNTHETIC,
@@ -681,7 +688,7 @@ def integrity_artifact_payload(
             "cache_atol": FEATURE_CACHE_ATOL,
             "cache_rtol": 0.0,
         }
-        if evidence_mode == EVIDENCE_PRODUCTION
+        if evidence_mode in {EVIDENCE_PRODUCTION, EVIDENCE_CPU_HARNESS}
         else {"id": "test_only_synthetic_feature_matrix_v1"}
     )
     return {
@@ -758,7 +765,7 @@ def _validate_carrier_records(records: Any, condition: str, config: Mapping[str,
             raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "carrier RMS is malformed") from exc
         if not math.isfinite(rms) or abs(rms - float(config["carrier"]["target_relative_rms"])) > float(config["carrier"]["target_relative_rms_absolute_tolerance"]):
             raise InvalidExperiment("EXECUTION_CARRIER_RECORDS_INVALID", "carrier RMS differs from the frozen target")
-        if evidence_mode == EVIDENCE_PRODUCTION:
+        if evidence_mode in {EVIDENCE_PRODUCTION, EVIDENCE_CPU_HARNESS}:
             production_fields = {"output_shape", "output_dtype", "input_tensor_sha256", "modified_tensor_sha256", "distinct_storage"}
             if (
                 not production_fields.issubset(record)
@@ -805,13 +812,15 @@ def validate_execution_record(
 ) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Path]]]:
     receipt: dict[str, Any] | None = None
     if synthetic_fixture:
+        expected_mode = EVIDENCE_SYNTHETIC
+        expected_evidence_schema = SYNTHETIC_EVIDENCE_SCHEMA
         if generation_receipt is not None:
             raise InvalidExperiment("GENERATION_RECEIPT_MODE_MISMATCH", "synthetic execution cannot consume a production generation receipt")
     else:
         try:
-            from .rc1_gpu_generation import RC1GPUGenerationError, _consume_generation_receipt
+            from .rc1_gpu_generation import RC1GPUGenerationError, consume_generation_receipt
 
-            receipt = _consume_generation_receipt(generation_receipt, record_path)
+            receipt = consume_generation_receipt(generation_receipt, record_path)
         except (RC1GPUGenerationError, AttributeError, TypeError) as exc:
             raise InvalidExperiment("GENERATION_RECEIPT_INVALID", "production execution requires a live same-process generation receipt") from exc
         expected_preflight = {
@@ -849,12 +858,23 @@ def validate_execution_record(
             raise InvalidExperiment("GENERATION_RECEIPT_RUNTIME_MISMATCH", "loaded model/runtime identity differs from the frozen generation")
         if receipt.get("record_path") != str(record_path.resolve()):
             raise InvalidExperiment("GENERATION_RECEIPT_PATH_MISMATCH", "generation receipt is not bound to this execution package")
-        if receipt.get("cpu_only_test_harness") is True and not allow_cpu_test_harness:
-            raise InvalidExperiment("CPU_TEST_HARNESS_FORBIDDEN", "CPU-only generation harness cannot enter the production CLI")
-        if receipt.get("cpu_only_test_harness") not in {True, False}:
-            raise InvalidExperiment("GENERATION_RECEIPT_INVALID", "generation receipt evidence boundary is malformed")
-        if receipt.get("cpu_only_test_harness") is False and "cuda" not in loaded["device"].lower():
-            raise InvalidExperiment("GENERATION_RECEIPT_RUNTIME_MISMATCH", "production generation was not observed on the frozen CUDA path")
+        authority_provenance = receipt.get("authority_provenance_class")
+        if authority_provenance == "production_generation":
+            if receipt.get("provenance_class") != "production_generation" or receipt.get("cpu_only_test_harness") is not False:
+                raise InvalidExperiment("GENERATION_RECEIPT_PROVENANCE_MISMATCH", "production authority metadata is contradictory")
+            expected_mode = EVIDENCE_PRODUCTION
+            expected_evidence_schema = PRODUCTION_EVIDENCE_SCHEMA
+        elif authority_provenance == "cpu_test_harness":
+            if receipt.get("provenance_class") != "cpu_test_harness" or receipt.get("cpu_only_test_harness") is not True:
+                raise InvalidExperiment("GENERATION_RECEIPT_PROVENANCE_MISMATCH", "CPU harness authority metadata is contradictory")
+            if not allow_cpu_test_harness:
+                raise InvalidExperiment("CPU_TEST_HARNESS_FORBIDDEN", "CPU-only generation harness cannot enter the production CLI")
+            if loaded["device"] != "cpu":
+                raise InvalidExperiment("GENERATION_RECEIPT_RUNTIME_MISMATCH", "CPU harness device observation changed")
+            expected_mode = EVIDENCE_CPU_HARNESS
+            expected_evidence_schema = CPU_HARNESS_EVIDENCE_SCHEMA
+        else:
+            raise InvalidExperiment("GENERATION_RECEIPT_PROVENANCE_MISMATCH", "receipt provenance class is not authority registered")
     if _forbidden_path(str(record_path)):
         raise InvalidExperiment("FORBIDDEN_FORMAL_PATH", "execution record path uses a forbidden formal ID")
     if record_path.is_symlink() or not record_path.is_file():
@@ -868,8 +888,6 @@ def validate_execution_record(
         raise InvalidExperiment("EXECUTION_SCHEMA_MISMATCH", "execution version or protocol changed")
     if record["plan_sha256"] != PLAN_RAW_SHA256 or record["prerequisite_identity"] != preflight_result.prerequisite.identity():
         raise InvalidExperiment("EXECUTION_IDENTITY_MISMATCH", "execution plan or prerequisite identity changed")
-    expected_mode = EVIDENCE_SYNTHETIC if synthetic_fixture else EVIDENCE_PRODUCTION
-    expected_evidence_schema = SYNTHETIC_EVIDENCE_SCHEMA if synthetic_fixture else PRODUCTION_EVIDENCE_SCHEMA
     if record["evidence_mode"] != expected_mode or record["evidence_schema"] != expected_evidence_schema:
         raise InvalidExperiment("EXECUTION_MODE_MISMATCH", "synthetic/formal execution mode is mislabeled")
     groups = record["groups"]
@@ -1116,7 +1134,7 @@ def _load_feature_artifact(paths: Mapping[str, Path], expected_video_sha: str, p
     _require_exact_keys(payload, {"schema_version", "feature_cache_schema", "evidence_mode", "source", "video_sha256", "extractor_identity", "comparison", "features"}, "FEATURE_ARTIFACT_INVALID")
     if payload["schema_version"] != 1 or payload["feature_cache_schema"] != FEATURE_CACHE_SCHEMA or payload["evidence_mode"] != evidence_mode or payload["video_sha256"] != expected_video_sha:
         raise InvalidExperiment("FEATURE_ARTIFACT_IDENTITY_MISMATCH", "feature schema, mode, or saved-MP4 binding changed")
-    if evidence_mode == EVIDENCE_PRODUCTION:
+    if evidence_mode in {EVIDENCE_PRODUCTION, EVIDENCE_CPU_HARNESS}:
         expected_extractor = {"id": FEATURE_EXTRACTOR_ID, "source_path": EXTRACTOR_LIBRARY_PATH, "source_sha256": preflight_result.source_hashes[EXTRACTOR_LIBRARY_PATH]}
         if payload["source"] != "recomputed_from_single_saved_mp4" or payload["extractor_identity"] != expected_extractor or payload["comparison"] != {"atol": FEATURE_CACHE_ATOL, "rtol": 0.0}:
             raise InvalidExperiment("FEATURE_EXTRACTOR_IDENTITY_MISMATCH", "frozen production extractor identity changed")
@@ -1129,7 +1147,7 @@ def _load_feature_artifact(paths: Mapping[str, Path], expected_video_sha: str, p
         raise InvalidExperiment("FEATURE_MATRIX_INVALID", "feature matrix cannot be decoded") from exc
     if features.shape != (13, 30) or not np.isfinite(features).all():
         raise InvalidExperiment("FEATURE_MATRIX_INVALID", "feature matrix must be finite 13x30")
-    if evidence_mode == EVIDENCE_PRODUCTION:
+    if evidence_mode in {EVIDENCE_PRODUCTION, EVIDENCE_CPU_HARNESS}:
         codec_identity, recomputed = _inspect_and_decode_saved_mp4(paths["video"])
         if recomputed.shape != (13, 30) or not np.isfinite(recomputed).all():
             raise InvalidExperiment("FEATURE_RECOMPUTE_INVALID", "frozen extractor did not return finite 13x30 features")
@@ -1144,7 +1162,11 @@ def _load_feature_artifact(paths: Mapping[str, Path], expected_video_sha: str, p
 
 def evaluate_execution(record: Mapping[str, Any], record_path: Path, artifact_paths: Mapping[tuple[str, str], Mapping[str, Path]], preflight_result: Preflight, *, synthetic_fixture: bool) -> tuple[list[dict[str, Any]], bool]:
     schedules = {"A": schedule_a(), "B": schedule_b()}
-    evidence_mode = EVIDENCE_SYNTHETIC if synthetic_fixture else EVIDENCE_PRODUCTION
+    evidence_mode = record["evidence_mode"]
+    if evidence_mode == EVIDENCE_SYNTHETIC and not synthetic_fixture:
+        raise InvalidExperiment("EXECUTION_MODE_MISMATCH", "synthetic execution requires explicit test-only admission")
+    if evidence_mode != EVIDENCE_SYNTHETIC and synthetic_fixture:
+        raise InvalidExperiment("EXECUTION_MODE_MISMATCH", "saved-MP4 execution cannot enter the synthetic feature path")
     group_results: list[dict[str, Any]] = []
     for group in record["groups"]:
         condition_results: list[dict[str, Any]] = []

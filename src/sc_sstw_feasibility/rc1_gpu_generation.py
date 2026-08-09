@@ -21,6 +21,8 @@ from .learned_observation import decode_saved_mp4, encode_saved_mp4, extract_fea
 from .rc1_method_validation import (
     ARTIFACT_NAMES,
     CONDITIONS,
+    CPU_HARNESS_EVIDENCE_SCHEMA,
+    EVIDENCE_CPU_HARNESS,
     EVIDENCE_PRODUCTION,
     EXECUTION_SCHEMA,
     FEATURE_CACHE_ATOL,
@@ -69,33 +71,83 @@ class GenerationOutcome:
     cpu_only_test_harness: bool
 
 
-_ACTIVE_RECEIPTS: dict[object, Path] = {}
+def _make_receipt_authority() -> tuple[Any, Any]:
+    """Create a closed issuer/registry and expose only binder plus consumer."""
 
+    authority = object()
+    active: dict[int, dict[str, Any]] = {}
 
-def _issue_generation_receipt(record_path: Path, snapshot: Mapping[str, Any]) -> GenerationReceipt:
-    seal = object()
-    receipt = object.__new__(GenerationReceipt)
-    object.__setattr__(receipt, "_seal", seal)
-    object.__setattr__(receipt, "_snapshot", canonical_json_bytes(snapshot))
-    _ACTIVE_RECEIPTS[seal] = record_path.resolve()
-    return receipt
+    def issue(record_path: Path, snapshot: Mapping[str, Any], provenance_class: str) -> GenerationReceipt:
+        if provenance_class not in {"production_generation", "cpu_test_harness"}:
+            raise RC1GPUGenerationError("receipt provenance class is not a controlled branch")
+        snapshot_bytes = canonical_json_bytes(snapshot)
+        seal = object()
+        receipt = object.__new__(GenerationReceipt)
+        object.__setattr__(receipt, "_seal", seal)
+        object.__setattr__(receipt, "_snapshot", snapshot_bytes)
+        active[id(receipt)] = {
+            "receipt": receipt,
+            "record_path": record_path.resolve(),
+            "authority": authority,
+            "seal": seal,
+            "snapshot": snapshot_bytes,
+            "snapshot_sha256": sha256_bytes(snapshot_bytes),
+            "provenance_class": provenance_class,
+            "completed": True,
+        }
+        return receipt
 
+    def consume(receipt: object, record_path: Path) -> dict[str, Any]:
+        """Consume an exact registered receipt once, before package reads."""
 
-def _consume_generation_receipt(receipt: object, record_path: Path) -> dict[str, Any]:
-    """Consume a receipt exactly once before any execution-package read."""
+        if type(receipt) is not GenerationReceipt:
+            raise RC1GPUGenerationError("generation receipt has the wrong exact type")
+        entry = active.pop(id(receipt), None)
+        if (
+            entry is None
+            or entry["receipt"] is not receipt
+            or entry["authority"] is not authority
+            or entry["seal"] is not receipt._seal
+            or entry["record_path"] != record_path.resolve()
+            or entry["completed"] is not True
+            or entry["snapshot"] != receipt._snapshot
+            or entry["snapshot_sha256"] != sha256_bytes(receipt._snapshot)
+        ):
+            raise RC1GPUGenerationError("generation receipt is absent, copied, replayed, tampered, or path-mismatched")
+        try:
+            snapshot = json.loads(entry["snapshot"])
+        except Exception as exc:  # pragma: no cover - locally assembled canonical JSON only
+            raise RC1GPUGenerationError("generation receipt snapshot is malformed") from exc
+        if (
+            not isinstance(snapshot, dict)
+            or snapshot.get("completed") is not True
+            or snapshot.get("provenance_class") != entry["provenance_class"]
+        ):
+            raise RC1GPUGenerationError("generation receipt provenance is incomplete or contradictory")
+        snapshot["authority_provenance_class"] = entry["provenance_class"]
+        return snapshot
 
-    if type(receipt) is not GenerationReceipt:
-        raise RC1GPUGenerationError("generation receipt has the wrong exact type")
-    bound_path = _ACTIVE_RECEIPTS.pop(receipt._seal, None)
-    if bound_path is None or bound_path != record_path.resolve():
-        raise RC1GPUGenerationError("generation receipt is absent, replayed, or path-mismatched")
-    try:
-        snapshot = json.loads(receipt._snapshot)
-    except Exception as exc:  # pragma: no cover - object is created only by the private factory
-        raise RC1GPUGenerationError("generation receipt snapshot is malformed") from exc
-    if not isinstance(snapshot, dict) or snapshot.get("completed") is not True:
-        raise RC1GPUGenerationError("generation receipt is incomplete")
-    return snapshot
+    def bind(control_flow: Any) -> Any:
+        def run_gpu_generation(
+            preflight: Preflight,
+            output_dir: Path,
+            command: Sequence[str],
+            *,
+            _test_backend: Any | None = None,
+        ) -> GenerationOutcome:
+            return control_flow(
+                preflight,
+                output_dir,
+                command,
+                _test_backend=_test_backend,
+                _authority_issue=issue,
+            )
+
+        run_gpu_generation.__name__ = "run_gpu_generation"
+        run_gpu_generation.__qualname__ = "run_gpu_generation"
+        return run_gpu_generation
+
+    return bind, consume
 
 
 LOCKED_GPU_PACKAGES = {
@@ -278,14 +330,15 @@ def _generate_condition(pipe: Any, torch: Any, preflight: Preflight, parameters:
     }
 
 
-def run_gpu_generation(
+def _run_gpu_generation_control_flow(
     preflight: Preflight,
     output_dir: Path,
     command: Sequence[str],
     *,
     _test_backend: Any | None = None,
+    _authority_issue: Any,
 ) -> GenerationOutcome:
-    """Generate two OFF/A/B groups and issue an opaque same-process receipt.
+    """Fixed generation control flow; the bound public wrapper owns issuance.
 
     ``_test_backend`` is dependency injection for the CPU-only control-flow
     harness.  The CLI never exposes it and receipts issued through it retain an
@@ -295,7 +348,10 @@ def run_gpu_generation(
     if output_dir.exists() and any(output_dir.iterdir()):
         raise RC1GPUGenerationError("generation output directory must be empty")
     output_dir.mkdir(parents=True, exist_ok=True)
-    cpu_only_test_harness = _test_backend is not None
+    provenance_class = "production_generation" if _test_backend is None else "cpu_test_harness"
+    cpu_only_test_harness = provenance_class == "cpu_test_harness"
+    evidence_mode = EVIDENCE_PRODUCTION if provenance_class == "production_generation" else EVIDENCE_CPU_HARNESS
+    evidence_schema = PRODUCTION_EVIDENCE_SCHEMA if provenance_class == "production_generation" else CPU_HARNESS_EVIDENCE_SCHEMA
     if _test_backend is None:
         try:
             import diffusers
@@ -321,7 +377,7 @@ def run_gpu_generation(
         environment = {
             "schema_version": 1,
             "artifact_schema": "sc_sstw_rc1_execution_environment_v1",
-            "evidence_mode": EVIDENCE_PRODUCTION,
+            "evidence_mode": evidence_mode,
             "model_id": preflight.config["model"]["id"],
             "model_revision": preflight.config["model"]["revision"],
             "runtime": runtime,
@@ -338,11 +394,36 @@ def run_gpu_generation(
     else:
         pipe = None
         torch = None
-        environment = _test_backend.load_environment(preflight)
-        if not isinstance(environment, Mapping):
-            raise RC1GPUGenerationError("CPU test backend returned an invalid environment")
-        environment = dict(environment)
-        loaded_identity = dict(_test_backend.loaded_identity(preflight, environment))
+        scheduler_identity = {
+            "class": "CPUControlFlowHarnessScheduler",
+            "config_sha256": sha256_bytes(canonical_json_bytes({"kind": "cpu_control_flow_harness_v1"})),
+            "bound_to_model_revision": preflight.config["model"]["revision"],
+        }
+        environment = {
+            "schema_version": 1,
+            "artifact_schema": "sc_sstw_rc1_execution_environment_v1",
+            "evidence_mode": evidence_mode,
+            "model_id": preflight.config["model"]["id"],
+            "model_revision": preflight.config["model"]["revision"],
+            "runtime": {
+                "python": sys.version,
+                "platform": platform.platform(),
+                "torch": "cpu_control_flow_harness",
+                "diffusers": "cpu_control_flow_harness",
+                "cuda": "unavailable_cpu_control_flow_harness",
+                "gpu": "cpu_control_flow_harness",
+                "versions": {"adapter": "cpu_control_flow_harness_v1"},
+            },
+            "scheduler": scheduler_identity,
+            "sampler": scheduler_identity.copy(),
+        }
+        loaded_identity = {
+            "model_id": preflight.config["model"]["id"],
+            "loaded_revision": preflight.config["model"]["revision"],
+            "scheduler": scheduler_identity,
+            "dtype": preflight.config["generation"]["dtype"],
+            "device": "cpu",
+        }
     if environment.get("model_id") != preflight.config["model"]["id"] or environment.get("model_revision") != preflight.config["model"]["revision"]:
         raise RC1GPUGenerationError("loaded model identity differs from the frozen revision")
     group_records: list[dict[str, Any]] = []
@@ -385,6 +466,10 @@ def run_gpu_generation(
                     if _test_backend is None
                     else _test_backend.generate_condition(preflight, parameters, initial_latents, condition, paths["video"])
                 )
+                raw_records = generated.get("carrier_records")
+                if not isinstance(raw_records, list) or any(not isinstance(item, Mapping) for item in raw_records):
+                    raise RC1GPUGenerationError("generation backend carrier events are malformed")
+                carrier_records = [{**dict(item), "evidence_mode": evidence_mode} for item in raw_records]
                 if generated.get("initial_latent_identity") != initial_identity or generated.get("condition_latent_identity") != initial_identity:
                     raise RC1GPUGenerationError("condition did not consume the shared latent identity")
                 if generated.get("video_saved_complete") is not True or not paths["video"].is_file() or generated.get("video_sha256") != sha256_file(paths["video"]):
@@ -392,7 +477,7 @@ def run_gpu_generation(
                 _write(paths["features"], canonical_json_bytes({
                     "schema_version": 1,
                     "feature_cache_schema": FEATURE_CACHE_SCHEMA,
-                    "evidence_mode": EVIDENCE_PRODUCTION,
+                    "evidence_mode": evidence_mode,
                     "source": "recomputed_from_single_saved_mp4",
                     "video_sha256": sha256_file(paths["video"]),
                     "extractor_identity": {"id": FEATURE_EXTRACTOR_ID, "source_path": EXTRACTOR_LIBRARY_PATH, "source_sha256": preflight.source_hashes[EXTRACTOR_LIBRARY_PATH]},
@@ -402,10 +487,10 @@ def run_gpu_generation(
                 _write(paths["stdout"], b"generation completed\n")
                 _write(paths["stderr"], b"")
                 saved_video_path = str(paths["video"].relative_to(output_dir))
-                _write(paths["config"], canonical_json_bytes(condition_config_payload(preflight, plan_group, condition, latent_sha, saved_video_path, EVIDENCE_PRODUCTION)) + b"\n")
+                _write(paths["config"], canonical_json_bytes(condition_config_payload(preflight, plan_group, condition, latent_sha, saved_video_path, evidence_mode)) + b"\n")
                 _write(paths["environment"], canonical_json_bytes(environment) + b"\n")
-                _write(paths["command"], canonical_json_bytes(command_artifact_payload(preflight, EVIDENCE_PRODUCTION)) + b"\n")
-                _write(paths["integrity"], canonical_json_bytes(integrity_artifact_payload(preflight, plan_group, condition, latent_sha, EVIDENCE_PRODUCTION, generated["carrier_records"], generated["codec_identity"])) + b"\n")
+                _write(paths["command"], canonical_json_bytes(command_artifact_payload(preflight, evidence_mode)) + b"\n")
+                _write(paths["integrity"], canonical_json_bytes(integrity_artifact_payload(preflight, plan_group, condition, latent_sha, evidence_mode, carrier_records, generated["codec_identity"])) + b"\n")
                 attempts.append({"condition": condition, "attempt_index": 0, "outcome": "success", "matched_parameters_sha256": parameter_sha})
             except Exception:
                 attempts.append({"condition": condition, "attempt_index": 0, "outcome": "failed", "matched_parameters_sha256": parameter_sha})
@@ -416,7 +501,7 @@ def run_gpu_generation(
                 "initial_latent_identity": initial_identity,
                 "condition_latent_identity": generated["condition_latent_identity"],
                 "carrier_hook_effect": condition != "OFF",
-                "carrier_records": generated["carrier_records"],
+                "carrier_records": carrier_records,
                 "video_saved_complete": generated["video_saved_complete"],
                 "video_sha256": generated["video_sha256"],
                 "codec_identity": generated["codec_identity"],
@@ -451,8 +536,8 @@ def run_gpu_generation(
         "protocol_id": PROTOCOL_ID,
         "plan_sha256": PLAN_RAW_SHA256,
         "prerequisite_identity": preflight.prerequisite.identity(),
-        "evidence_mode": EVIDENCE_PRODUCTION,
-        "evidence_schema": PRODUCTION_EVIDENCE_SCHEMA,
+        "evidence_mode": evidence_mode,
+        "evidence_schema": evidence_schema,
         "groups": group_records,
     }
     record_path = output_dir / "execution.json"
@@ -461,6 +546,7 @@ def run_gpu_generation(
         "schema_version": 1,
         "trust_boundary": "same_clean_source_runner_process_observed_generation_call",
         "completed": True,
+        "provenance_class": provenance_class,
         "cpu_only_test_harness": cpu_only_test_harness,
         "record_path": str(record_path.resolve()),
         "execution_record_sha256": sha256_file(record_path),
@@ -483,8 +569,15 @@ def run_gpu_generation(
         },
         "loaded_identity": loaded_identity,
         "environment": environment,
-        "command_artifact": command_artifact_payload(preflight, EVIDENCE_PRODUCTION),
+        "command_artifact": command_artifact_payload(preflight, evidence_mode),
         "groups": receipt_groups,
     }
-    receipt = _issue_generation_receipt(record_path, receipt_snapshot)
+    receipt = _authority_issue(record_path, receipt_snapshot, provenance_class)
     return GenerationOutcome(record_path=record_path, receipt=receipt, cpu_only_test_harness=cpu_only_test_harness)
+
+
+_bind_generation_control_flow, consume_generation_receipt = _make_receipt_authority()
+run_gpu_generation = _bind_generation_control_flow(_run_gpu_generation_control_flow)
+del _bind_generation_control_flow
+del _make_receipt_authority
+del _run_gpu_generation_control_flow

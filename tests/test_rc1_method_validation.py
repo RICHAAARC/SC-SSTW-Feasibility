@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -36,11 +37,13 @@ from src.sc_sstw_feasibility.rc1_method_validation import (
     CONFIG_PATH,
     CONFIG_RAW_SHA256,
     CONDITIONS,
+    EVIDENCE_CPU_HARNESS,
     EVIDENCE_PRODUCTION,
     EVIDENCE_SYNTHETIC,
     EXECUTION_SCHEMA,
     FEATURE_CACHE_SCHEMA,
     FORBIDDEN_CLAIM_TOKENS,
+    GPU_LIBRARY_PATH,
     MANIFEST_SCHEMA,
     NOTEBOOK_PATH,
     OUTPUT_SCHEMA,
@@ -49,6 +52,7 @@ from src.sc_sstw_feasibility.rc1_method_validation import (
     PLAN_RAW_SHA256,
     PRODUCTION_EVIDENCE_SCHEMA,
     PROTOCOL_ID,
+    PROTOCOL_PATH,
     REQUIRED_SOURCE_PATHS,
     RUNNER_PATH,
     START_INDICES,
@@ -425,6 +429,32 @@ class _CPUOnlyGenerationBackend:
         }
 
 
+class _MasqueradingCPUBackend(_CPUOnlyGenerationBackend):
+    cpu_only_test_harness = False
+    provenance_class = "production_generation"
+    complete_snapshot = {"completed": True, "provenance_class": "production_generation"}
+
+    def load_environment(self, frozen: object) -> dict[str, object]:
+        environment = _production_environment(frozen.config)
+        environment["runtime"]["gpu"] = "malicious CUDA claim"
+        return environment
+
+    def loaded_identity(self, frozen: object, environment: dict[str, object]) -> dict[str, object]:
+        return {
+            "model_id": frozen.config["model"]["id"],
+            "loaded_revision": frozen.config["model"]["revision"],
+            "scheduler": environment["scheduler"],
+            "dtype": "torch.bfloat16",
+            "device": "cuda:0",
+            "provenance_class": "production_generation",
+        }
+
+
+class _FailingCPUBackend(_CPUOnlyGenerationBackend):
+    def generate_condition(self, frozen: object, parameters: dict[str, object], initial_latent: np.ndarray, condition: str, video_path: Path) -> dict[str, object]:
+        raise RuntimeError("injected CPU generation failure before receipt issue")
+
+
 def _make_receipted_production_execution(path: Path, frozen: object, *, corrupt_video: bool = False, real_mp4: bool = False):
     return run_gpu_generation(frozen, path, [RUNNER_PATH, "--generate"], _test_backend=_CPUOnlyGenerationBackend(corrupt_video=corrupt_video, real_mp4=real_mp4))
 
@@ -562,7 +592,7 @@ def test_valid_synthetic_execution_scans_every_case_without_averaging(environmen
             assert condition["case_pass"] is True
 
 
-def test_production_saved_mp4_is_decoded_recomputed_and_enters_evaluator(environment: dict[str, object], tmp_path: Path) -> None:
+def test_cpu_harness_saved_mp4_is_decoded_recomputed_and_enters_test_evaluator(environment: dict[str, object], tmp_path: Path) -> None:
     outcome = _make_receipted_production_execution(tmp_path / "production-execution", environment["frozen"], real_mp4=True)
     record_path = outcome.record_path
     record, artifacts = validate_execution_record(
@@ -575,7 +605,7 @@ def test_production_saved_mp4_is_decoded_recomputed_and_enters_evaluator(environ
     groups, passed = evaluate_execution(record, record_path, artifacts, environment["frozen"], synthetic_fixture=False)
     assert passed is False
     assert len(groups) == 2
-    assert record["evidence_mode"] == EVIDENCE_PRODUCTION
+    assert record["evidence_mode"] == EVIDENCE_CPU_HARNESS
 
 
 def _mutate_receipt_snapshot(receipt: GenerationReceipt, mutate) -> None:
@@ -602,12 +632,123 @@ def test_generation_receipt_is_single_use_and_cpu_harness_requires_explicit_inte
     assert _reason(replayed) == "GENERATION_RECEIPT_INVALID"
 
 
+def test_cpu_backend_cannot_select_production_with_cuda_flags_or_snapshot(environment: dict[str, object], tmp_path: Path) -> None:
+    outcome = run_gpu_generation(
+        environment["frozen"],
+        tmp_path / "malicious-cpu-backend",
+        [RUNNER_PATH, "--generate"],
+        _test_backend=_MasqueradingCPUBackend(),
+    )
+    snapshot = json.loads(outcome.receipt._snapshot)
+    assert outcome.cpu_only_test_harness is True
+    assert snapshot["provenance_class"] == "cpu_test_harness"
+    assert snapshot["cpu_only_test_harness"] is True
+    assert snapshot["loaded_identity"]["device"] == "cpu"
+    assert snapshot["environment"]["runtime"]["gpu"] == "cpu_control_flow_harness"
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(outcome.record_path, environment["frozen"], synthetic_fixture=False, generation_receipt=outcome.receipt)
+    assert _reason(caught) == "CPU_TEST_HARNESS_FORBIDDEN"
+
+
+def test_cpu_receipt_flag_and_device_tamper_has_no_resigning_path(environment: dict[str, object], tmp_path: Path) -> None:
+    outcome = _make_receipted_production_execution(tmp_path / "cpu-relabel-attempt", environment["frozen"])
+    _mutate_receipt_snapshot(
+        outcome.receipt,
+        lambda snapshot: (snapshot.update(cpu_only_test_harness=False, provenance_class="production_generation"), snapshot["loaded_identity"].update(device="cuda:0")),
+    )
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(outcome.record_path, environment["frozen"], synthetic_fixture=False, generation_receipt=outcome.receipt)
+    assert _reason(caught) == "GENERATION_RECEIPT_INVALID"
+
+
+def test_generation_failure_occurs_before_any_receipt_is_issued(environment: dict[str, object], tmp_path: Path) -> None:
+    output = tmp_path / "failed-before-receipt"
+    with pytest.raises(RuntimeError, match="before receipt issue"):
+        run_gpu_generation(environment["frozen"], output, [RUNNER_PATH, "--generate"], _test_backend=_FailingCPUBackend())
+    assert not (output / "execution.json").exists()
+    import src.sc_sstw_feasibility.rc1_gpu_generation as generation
+    assert not any("active_receipt" in name.lower() or "issue" in name.lower() for name in dir(generation))
+
+
 def test_generation_receipt_has_no_public_constructor_and_deserialized_copy_is_invalid(environment: dict[str, object], tmp_path: Path) -> None:
     with pytest.raises(TypeError):
         GenerationReceipt()
     outcome = _make_receipted_production_execution(tmp_path / "receipt-deserialization", environment["frozen"])
     with pytest.raises(TypeError):
         pickle.dumps(outcome.receipt)
+
+
+def test_receipt_issuer_is_not_available_by_ordinary_module_access() -> None:
+    import src.sc_sstw_feasibility.rc1_gpu_generation as generation
+
+    with pytest.raises(ImportError):
+        exec("from src.sc_sstw_feasibility.rc1_gpu_generation import _issue_generation_receipt", {})
+    forbidden = {"_issue_generation_receipt", "issue_generation_receipt", "from_snapshot", "from_mapping", "_make_receipt_authority", "_run_gpu_generation_control_flow"}
+    assert forbidden.isdisjoint(dir(generation))
+    assert all("issue" not in name.lower() and "from_snapshot" not in name.lower() for name in dir(generation))
+    for name in forbidden:
+        with pytest.raises(AttributeError):
+            getattr(generation, name)
+    assert not hasattr(generation.run_gpu_generation, "issuer")
+
+
+def test_receipt_snapshot_is_locally_assembled_and_backend_cannot_supply_authority_payload() -> None:
+    source = (REPO_ROOT / GPU_LIBRARY_PATH).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    top_level_functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    assert "_issue_generation_receipt" not in top_level_functions
+    control = top_level_functions["_run_gpu_generation_control_flow"]
+    control_source = ast.get_source_segment(source, control)
+    assert control_source is not None
+    assert "receipt_snapshot = {" in control_source
+    assert "_authority_issue(record_path, receipt_snapshot, provenance_class)" in control_source
+    forbidden_backend_authority_inputs = (
+        "_test_backend.load_environment",
+        "_test_backend.loaded_identity",
+        "_test_backend.snapshot",
+        "_test_backend.provenance_class",
+        "_test_backend.cpu_only_test_harness",
+    )
+    assert not any(token in control_source for token in forbidden_backend_authority_inputs)
+
+
+def test_protocol_declares_finite_process_threat_boundary_without_strong_authenticity_claims() -> None:
+    protocol = (REPO_ROOT / PROTOCOL_PATH).read_text(encoding="utf-8").lower()
+    required = (
+        "ordinary import/getattr",
+        "cpu-harness relabelling",
+        "arbitrary code execution already",
+        "closure/cell reflection",
+        "monkeypatching",
+        "direct memory modification",
+        "debugger injection",
+        "os process isolation",
+        "independently held signing secret",
+    )
+    assert all(token in protocol for token in required)
+    forbidden = ("unforgeable", "secure attestation", "cryptographically secure", "remote proof")
+    assert not any(token in protocol for token in forbidden)
+
+
+def test_receipt_construction_copy_serialization_and_field_mutation_cannot_register(environment: dict[str, object], tmp_path: Path) -> None:
+    outcome = _make_receipted_production_execution(tmp_path / "receipt-copy-matrix", environment["frozen"])
+    receipt = outcome.receipt
+    forged = object.__new__(GenerationReceipt)
+    object.__setattr__(forged, "_seal", receipt._seal)
+    object.__setattr__(forged, "_snapshot", receipt._snapshot)
+    with pytest.raises(InvalidExperiment) as caught:
+        validate_execution_record(outcome.record_path, environment["frozen"], synthetic_fixture=False, generation_receipt=forged, allow_cpu_test_harness=True)
+    assert _reason(caught) == "GENERATION_RECEIPT_INVALID"
+    with pytest.raises((TypeError, ValueError)):
+        dataclasses.replace(receipt)
+    with pytest.raises(TypeError):
+        copy.copy(receipt)
+    with pytest.raises(TypeError):
+        copy.deepcopy(receipt)
+    with pytest.raises(TypeError):
+        pickle.dumps(receipt)
+    with pytest.raises((dataclasses.FrozenInstanceError, AttributeError)):
+        receipt._snapshot = b"tampered"
 
 
 @pytest.mark.parametrize(
@@ -644,7 +785,7 @@ def test_generation_receipt_to_disk_tamper_matrix_is_invalid(environment: dict[s
     _mutate_receipt_snapshot(outcome.receipt, mutation)
     with pytest.raises(InvalidExperiment) as caught:
         validate_execution_record(outcome.record_path, environment["frozen"], synthetic_fixture=False, generation_receipt=outcome.receipt, allow_cpu_test_harness=True)
-    assert _reason(caught) == reason
+    assert _reason(caught) == "GENERATION_RECEIPT_INVALID"
 
 
 def test_test_only_synthetic_cannot_masquerade_as_production(environment: dict[str, object]) -> None:
@@ -1020,6 +1161,7 @@ def test_cpu_only_backend_traverses_real_runner_generation_receipt_decode_and_ev
     assert result in {0, 3}
     assert audit["status"] in {STATUS_PASS, STATUS_FAIL}
     assert audit["cpu_only_test_harness"] is True
+    assert audit["evidence_mode"] == EVIDENCE_CPU_HARNESS
     assert audit["generation_trust_boundary"] == "cpu_only_control_flow_harness"
     assert audit["formal_result"] is False and audit["stage_progression_allowed"] is False
     assert len(audit["groups"]) == 2
