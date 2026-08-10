@@ -119,6 +119,58 @@ def relation_probability_contrasts_numpy(
     return np.stack(records, axis=0)
 
 
+def selected_bias_updates(state: Vector2, strength: float) -> tuple[tuple[int, int, int, float], ...]:
+    """Return row-local additive-mask updates for the thirteen frozen queries."""
+
+    validate_frozen_sparse_geometry()
+    updates: list[tuple[int, int, int, float]] = []
+    for row_offset, (query, pair_1, pair_2) in enumerate(
+        zip(TARGET_QUERY_INDICES, B1_KEY_PAIRS, B2_KEY_PAIRS, strict=True)
+    ):
+        for amplitude, pair in zip(state, (pair_1, pair_2), strict=True):
+            for key_index, coefficient in zip(pair, PAIR_COEFFICIENTS, strict=True):
+                delta = float(strength) * float(amplitude) * coefficient
+                if delta != 0.0:
+                    updates.append((row_offset, query, key_index, delta))
+    return tuple(updates)
+
+
+def dispatch_native_selected_attention(
+    dispatch_attention_fn: Any,
+    target_query: Any,
+    key: Any,
+    value: Any,
+    additive_bias: Any,
+) -> Any:
+    """Run the native diffusers/PyTorch SDPA path for only selected query rows."""
+
+    if tuple(target_query.shape[:1] + target_query.shape[2:]) != tuple(key.shape[:1] + key.shape[2:]):
+        raise ValueError("selected query and key batch/head dimensions differ")
+    if tuple(key.shape) != tuple(value.shape):
+        raise ValueError("key and value shapes differ")
+    if tuple(additive_bias.shape) != (1, 1, int(target_query.shape[1]), int(key.shape[1])):
+        raise ValueError("selected additive bias is not broadcastable [1,1,Q,K]")
+    return dispatch_attention_fn(
+        target_query,
+        key,
+        value,
+        attn_mask=additive_bias,
+        dropout_p=0.0,
+        is_causal=False,
+        backend="native",
+    )
+
+
+def replace_selected_rows(full_heads: Any, selected_heads: Any, query_index: Any, *, active: bool) -> Any:
+    """Keep OFF byte-for-byte on the full Wan output; replace only active rows."""
+
+    if not active:
+        return full_heads
+    replacement = full_heads.clone()
+    replacement[:, query_index] = selected_heads.to(dtype=full_heads.dtype)
+    return replacement
+
+
 def _apply_rotary(torch: Any, hidden_states: Any, rotary_emb: Any) -> Any:
     freqs_cos, freqs_sin = rotary_emb
     x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
@@ -180,21 +232,32 @@ class S1WanRelationProcessor:
 
         full_heads = dispatch_attention_fn(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, backend=None)
         query_index = torch.tensor(TARGET_QUERY_INDICES, device=query.device, dtype=torch.long)
-        target_query = query.index_select(1, query_index).float()
-        logits = torch.einsum("bqhd,bkhd->bhqk", target_query, key.float()) / math.sqrt(128.0)
+        target_query = query.index_select(1, query_index)
+        diagnostic_logits = torch.einsum("bqhd,bkhd->bhqk", target_query.float(), key.float()) / math.sqrt(128.0)
         state = self.context["state"]
+        sparse_updates = selected_bias_updates(state, self.strength)
+        additive_bias = torch.zeros(
+            (1, 1, len(TARGET_QUERY_INDICES), int(key.shape[1])),
+            device=query.device,
+            dtype=query.dtype,
+        )
         bias_updates: list[dict[str, float | int]] = []
-        for row_offset, (pair_1, pair_2) in enumerate(zip(B1_KEY_PAIRS, B2_KEY_PAIRS, strict=True)):
-            for amplitude, pair in zip(state, (pair_1, pair_2), strict=True):
-                for key_index, coefficient in zip(pair, PAIR_COEFFICIENTS, strict=True):
-                    delta = self.strength * amplitude * coefficient
-                    if delta != 0.0:
-                        logits[:, :, row_offset, key_index] += delta
-                        bias_updates.append({"query": TARGET_QUERY_INDICES[row_offset], "key": key_index, "delta": delta})
-        probabilities = torch.softmax(logits, dim=-1)
-        recomputed = torch.einsum("bhqk,bkhd->bqhd", probabilities, value.float())
+        for row_offset, query_index_value, key_index, delta in sparse_updates:
+            diagnostic_logits[:, :, row_offset, key_index] += delta
+            additive_bias[:, :, row_offset, key_index] += delta
+            bias_updates.append({"query": query_index_value, "key": key_index, "delta": delta})
+        if not bool(torch.isfinite(additive_bias).all().item()):
+            raise RuntimeError("selected additive bias is non-finite")
+        probabilities = torch.softmax(diagnostic_logits, dim=-1)
+        if not bool(torch.isfinite(probabilities).all().item()):
+            raise RuntimeError("manual relation observation is non-finite")
+        selected_heads = dispatch_native_selected_attention(
+            dispatch_attention_fn, target_query, key, value, additive_bias
+        )
+        if tuple(selected_heads.shape) != tuple(target_query.shape) or not bool(torch.isfinite(selected_heads).all().item()):
+            raise RuntimeError("native selected-row SDPA output is invalid")
         reference = full_heads.index_select(1, query_index).float()
-        difference = recomputed - reference
+        difference = selected_heads.float() - reference
         reference_rms = reference.square().mean().sqrt()
         relative_rms = float((difference.square().mean().sqrt() / torch.clamp(reference_rms, min=1e-30)).item())
         global_ulp = float((torch.clamp(reference.abs().max(), min=1e-30) * (2.0 ** -7)).item())
@@ -213,10 +276,7 @@ class S1WanRelationProcessor:
         relation = torch.stack(pair_records, dim=1).mean(dim=0).detach().float().cpu().tolist()
 
         active = state != (0.0, 0.0)
-        if active:
-            replacement = full_heads.clone()
-            replacement[:, query_index] = recomputed.to(dtype=full_heads.dtype)
-            full_heads = replacement
+        full_heads = replace_selected_rows(full_heads, selected_heads, query_index, active=active)
         output = full_heads.flatten(2, 3).type_as(query)
         output = attn.to_out[0](output)
         output = attn.to_out[1](output)
@@ -226,6 +286,9 @@ class S1WanRelationProcessor:
             "relation": relation, "bias_updates": bias_updates,
             "pair_sums_zero": all(abs(left["delta"] + right["delta"]) <= 1e-12 for left, right in zip(bias_updates[::2], bias_updates[1::2], strict=True)),
             "changed_logit_count": len(bias_updates), "dense_bias_materialized": False,
+            "selected_bias_shape": [1, 1, len(TARGET_QUERY_INDICES), int(key.shape[1])],
+            "selected_native_backend": "native",
+            "selected_rows_replaced": len(TARGET_QUERY_INDICES) if active else 0,
             "lambda_zero_reference_relative_rms": relative_rms,
             "lambda_zero_reference_max_bfloat16_ulp": max_ulp,
             "non_target_rows_replaced": 0,

@@ -16,8 +16,11 @@ from sstw.relation_injector import (
     TARGET_QUERY_INDICES,
     S1WanRelationProcessor,
     apply_sparse_logit_bias_numpy,
+    dispatch_native_selected_attention,
     install_s1_processor,
+    replace_selected_rows,
     relation_probability_contrasts_numpy,
+    selected_bias_updates,
     validate_frozen_sparse_geometry,
 )
 from sstw.s1_real_dit_relation_primitive import (
@@ -322,6 +325,10 @@ def test_production_runtime_and_notebook_have_no_exact_environment_blocker() -> 
     assert "torch.cuda.is_available()" in code and "torch.cuda.is_bf16_supported()" in code
     assert "diffusers==0.35.2" in code
     assert "0fad780a534b6463e45facd96134c9f345acfa5b" in code
+    assert "L4 is supported" in code and "A100" not in code
+    assert "S1 runner stdout:" in code and "runner did not publish audit:" in code
+    assert code.index("runner_stdout =") < code.index("runner audit missing")
+    assert notebook["metadata"]["colab"]["gpuType"] == "L4"
     source = paths[1].read_text(encoding="utf-8")
     assert "notebook_install_suggestions" not in source
     assert "software_diagnostics !=" not in source and "locked_software" not in source
@@ -352,6 +359,60 @@ def test_sparse_numpy_reference_changes_only_four_keys_and_is_odd() -> None:
     assert len(plus_updates) == len(minus_updates) == 4
     zero, updates = apply_sparse_logit_bias_numpy(logits, query, b1, b2, (0.0, 0.0), 1.0)
     assert np.array_equal(zero, logits) and updates == ()
+
+
+def test_selected_native_sdpa_uses_only_thirteen_query_rows_and_additive_bias() -> None:
+    target_query = np.zeros((1, 13, 1, 2), dtype=np.float32)
+    key = np.zeros((1, 8320, 1, 2), dtype=np.float32)
+    value = np.ones_like(key)
+    zero_bias = np.zeros((1, 1, 13, 8320), dtype=np.float32)
+    active_bias = zero_bias.copy()
+    updates = selected_bias_updates((1.0, 0.0), 1.0)
+    for row_offset, query_index, key_index, delta in updates:
+        assert query_index == TARGET_QUERY_INDICES[row_offset]
+        active_bias[:, :, row_offset, key_index] += delta
+    calls: list[dict[str, object]] = []
+
+    def fake_dispatch(query: np.ndarray, dispatch_key: np.ndarray, dispatch_value: np.ndarray, **kwargs: object) -> np.ndarray:
+        calls.append({"query_shape": query.shape, "key_shape": dispatch_key.shape, **kwargs})
+        assert dispatch_value.shape == dispatch_key.shape
+        return np.zeros_like(query)
+
+    dispatch_native_selected_attention(fake_dispatch, target_query, key, value, zero_bias)
+    dispatch_native_selected_attention(fake_dispatch, target_query, key, value, active_bias)
+    assert [call["backend"] for call in calls] == ["native", "native"]
+    assert all(call["query_shape"] == (1, 13, 1, 2) for call in calls)
+    assert all(call["attn_mask"].shape == (1, 1, 13, 8320) for call in calls)
+    assert np.count_nonzero(calls[0]["attn_mask"]) == 0
+    assert np.count_nonzero(calls[1]["attn_mask"]) == 26
+    assert len(updates) == 26
+
+
+class _FakeRows:
+    def __init__(self, value: np.ndarray) -> None:
+        self.value = np.asarray(value).copy()
+        self.dtype = self.value.dtype
+
+    def clone(self) -> "_FakeRows":
+        return _FakeRows(self.value)
+
+    def to(self, *, dtype: object) -> "_FakeRows":
+        assert dtype == self.dtype
+        return self
+
+    def __setitem__(self, index: object, value: "_FakeRows") -> None:
+        self.value[index] = value.value
+
+
+def test_off_keeps_original_full_output_and_active_replaces_only_selected_rows() -> None:
+    full = _FakeRows(np.arange(20, dtype=np.float32).reshape(1, 20, 1))
+    selected = _FakeRows(np.asarray([[[100.0], [200.0]]], dtype=np.float32))
+    indices = np.asarray([3, 17])
+    assert replace_selected_rows(full, selected, indices, active=False) is full
+    active = replace_selected_rows(full, selected, indices, active=True)
+    assert np.array_equal(full.value, np.arange(20, dtype=np.float32).reshape(1, 20, 1))
+    assert active.value[0, 3, 0] == 100.0 and active.value[0, 17, 0] == 200.0
+    assert np.array_equal(np.delete(active.value, indices, axis=1), np.delete(full.value, indices, axis=1))
 
 
 def test_sparse_probability_jacobian_has_correct_sign_low_cross_and_common_mode() -> None:
@@ -441,6 +502,17 @@ def test_real_processor_source_has_qkv_norm_rope_sparse_rows_and_no_proxy() -> N
     assert "8320, 8320" not in source and "register_forward_hook" not in source
     forbidden = ("output_residual", "latent_carrier", "vae.decode", "pixel_carrier")
     assert all(token not in source.lower() for token in forbidden)
+
+
+def test_lambda_zero_numeric_difference_is_diagnostic_not_a_preinjection_gate() -> None:
+    source = (ROOT / "src/sstw/s1_real_dit_relation_primitive.py").read_text(encoding="utf-8")
+    assert "lambda-zero sparse-row recompute equivalence failed before injection" not in source
+    assert '"lambda_zero_numeric_diagnostics"' in source
+    assert "lambda_zero_relative_rms_maximum" not in source
+    processor_source = inspect.getsource(S1WanRelationProcessor)
+    assert 'backend="native"' not in processor_source  # dispatch is isolated in the tested helper
+    assert "dispatch_native_selected_attention" in processor_source
+    assert "selected_rows_replaced" in processor_source
 
 
 def test_runner_source_freezes_prefix_fork_and_no_VAE_or_MP4_execution() -> None:

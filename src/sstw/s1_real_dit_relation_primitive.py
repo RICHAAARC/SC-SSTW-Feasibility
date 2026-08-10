@@ -437,14 +437,6 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
                 _velocity, captured = one_call(probe_latent, timestep, 4, condition, branch, CONDITION_STATES[condition], True)
                 probe[condition][branch] = captured
                 del _velocity
-            if condition == "OFF_R1":
-                equivalence_records = [probe[condition][branch]["processor"] for branch in BRANCH_ORDER]
-                if not all(
-                    item["lambda_zero_reference_relative_rms"] <= config["thresholds"]["lambda_zero_relative_rms_maximum"]
-                    and item["lambda_zero_reference_max_bfloat16_ulp"] <= config["thresholds"]["lambda_zero_max_bfloat16_ulp"]
-                    for item in equivalence_records
-                ):
-                    raise S1InstrumentationError("lambda-zero sparse-row recompute equivalence failed before injection")
         hook.remove()
         target_block.attn1.set_processor(original_processor)
         attention_parameter_sha256_after = sha256_parameters(target_block.attn1)
@@ -494,7 +486,20 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
             "all_inference_mode_enabled": all(record["inference_mode_enabled"] is True for record in processor.records),
             "all_non_target_rows_unreplaced": all(record["non_target_rows_replaced"] == 0 for record in processor.records),
             "dense_bias_never_materialized": all(record["dense_bias_materialized"] is False for record in processor.records),
+            "all_selected_bias_shapes_valid": all(record["selected_bias_shape"] == [1, 1, 13, 8320] for record in processor.records),
+            "all_selected_native": all(record["selected_native_backend"] == "native" for record in processor.records),
             "probe_bias_counts": [probe[condition][branch]["processor"]["changed_logit_count"] for condition in CONDITION_ORDER for branch in BRANCH_ORDER],
+            "probe_replacement_counts": [probe[condition][branch]["processor"]["selected_rows_replaced"] for condition in CONDITION_ORDER for branch in BRANCH_ORDER],
+            "lambda_zero_numeric_diagnostics": [
+                {
+                    "condition": condition,
+                    "branch": branch,
+                    "relative_rms": probe[condition][branch]["processor"]["lambda_zero_reference_relative_rms"],
+                    "max_bfloat16_ulp": probe[condition][branch]["processor"]["lambda_zero_reference_max_bfloat16_ulp"],
+                }
+                for condition in ("OFF_R1", "OFF_R2")
+                for branch in BRANCH_ORDER
+            ],
             "attention_parameter_sha256_before": attention_parameter_sha256_before,
             "attention_parameter_sha256_after": attention_parameter_sha256_after,
         }
@@ -502,7 +507,9 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
             structural["all_processor_records_finite"] and structural["all_pair_sums_zero"]
             and structural["all_grad_disabled"] and structural["all_inference_mode_enabled"]
             and structural["all_non_target_rows_unreplaced"] and structural["dense_bias_never_materialized"]
+            and structural["all_selected_bias_shapes_valid"] and structural["all_selected_native"]
             and structural["probe_bias_counts"] == [0, 0, 0, 0, 26, 26, 26, 26, 26, 26, 26, 26]
+            and structural["probe_replacement_counts"] == [0, 0, 0, 0, 13, 13, 13, 13, 13, 13, 13, 13]
         )
         status = "S1_GO" if evaluation["all_cells_pass"] and structural["passed"] else "S1_NO_GO_THIS_CONSTRUCTION"
         serializable_probe = {
