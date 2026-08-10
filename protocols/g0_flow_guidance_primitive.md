@@ -21,3 +21,7 @@ No result-dependent observer, strength, boundary, prompt, seed or threshold
 change is permitted inside this experiment.  A valid failure ends SSTW-v2
 Flow-guidance and permits, but does not automatically start, a separately
 versioned structured-initial-noise experiment.
+
+An axis cannot pass on sign alone.  Its own-coordinate odd RMS must be at least
+eight times the larger of the OFF-repeat observation RMS and the frozen
+float32 numerical floor (`32 * eps * max(1, OFF-baseline observation RMS)`).

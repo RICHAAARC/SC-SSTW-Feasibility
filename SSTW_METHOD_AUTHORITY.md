@@ -162,6 +162,7 @@ prompt = locked camera, dark matte background, a single bright white cube moving
 negative_prompt = text, watermark, logo, camera motion, cuts, multiple subjects, flicker
 seed = 1275
 guidance_scale = 5.0
+max_sequence_length = 226
 inference_steps = 8
 frames = 49
 height = 320
@@ -193,10 +194,11 @@ G0 不写 MP4、不运行 AISB/calibration/Viterbi；只比较最终 VAE RGB obs
 1. 两个 axis gradient finite 且 RMS > 0；
 2. gradient absolute cosine `< 0.5`；
 3. 每轴 odd response (O=(q_+-q_-)/2) 在目标坐标方向为正；
-4. cross/own response ratio `<= 0.5`；
-5. even/odd ratio `<= 0.5`；
-6. 每个 active final RGB 相对 OFF RMS `<= 0.02`；
-7. OFF_R1/OFF_R2 的确定性差异只作数值噪声地板记录，不以平均掩盖任一轴。
+4. 每轴 own odd RMS `>= 8 × max(OFF repeat observation RMS, numeric floor)`，其中 `numeric floor = 32 × float32 epsilon × max(1, OFF baseline observation RMS)`；
+5. cross/own response ratio `<= 0.5`；
+6. even/odd ratio `<= 0.5`；
+7. 每个 active final RGB 相对 OFF RMS `<= 0.02`；
+8. OFF_R1/OFF_R2 的确定性差异只作数值噪声地板记录，不以平均掩盖任一轴。
 
 终态只允许：
 

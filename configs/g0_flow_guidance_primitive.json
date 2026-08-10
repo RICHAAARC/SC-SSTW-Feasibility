@@ -11,6 +11,7 @@
     "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple subjects, flicker",
     "seed": 1275,
     "guidance_scale": 5.0,
+    "max_sequence_length": 226,
     "inference_steps": 8,
     "frames": 49,
     "height": 320,
@@ -29,6 +30,8 @@
     "conditions": ["OFF_R1", "OFF_R2", "PLUS_G1", "MINUS_G1", "PLUS_G2", "MINUS_G2"]
   },
   "criteria": {
+    "minimum_odd_to_floor_ratio": 8.0,
+    "numeric_floor_float32_eps_multiplier": 32.0,
     "maximum_absolute_gradient_cosine": 0.5,
     "maximum_cross_to_own_ratio": 0.5,
     "maximum_even_to_odd_ratio": 0.5,

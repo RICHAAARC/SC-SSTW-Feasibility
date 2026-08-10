@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import math
+import json
+from pathlib import Path
 
 import pytest
 
 from sstw.flow_guidance_embedder import (
     FrozenGuidanceConfig,
     OBSERVER_FRAME_INDICES,
+    evaluate_g0_metrics,
+    load_g0_config,
     scalar_cosine,
     scalar_rms,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_frozen_g0_config_and_frames() -> None:
@@ -17,6 +24,9 @@ def test_frozen_g0_config_and_frames() -> None:
     config.validate()
     assert OBSERVER_FRAME_INDICES == tuple(range(0, 49, 4))
     assert config.relative_update_rms == 0.005
+    loaded = load_g0_config(ROOT / "configs/g0_flow_guidance_primitive.json")
+    assert loaded["generation"]["max_sequence_length"] == 226
+    assert loaded["criteria"]["minimum_odd_to_floor_ratio"] == 8.0
 
 
 def test_scalar_axis_diagnostics() -> None:
@@ -37,3 +47,43 @@ def test_scalar_axis_diagnostics() -> None:
 def test_bad_axis_diagnostics_reject(left, right) -> None:
     with pytest.raises(ValueError):
         scalar_cosine(left, right)
+
+
+def _observations(amplitude: float) -> dict[str, list[list[float]]]:
+    zero = [[0.0, 0.0] for _ in range(13)]
+    return {
+        "OFF_R1": [row[:] for row in zero],
+        "OFF_R2": [row[:] for row in zero],
+        "PLUS_G1": [[amplitude, 0.0] for _ in range(13)],
+        "MINUS_G1": [[-amplitude, 0.0] for _ in range(13)],
+        "PLUS_G2": [[0.0, amplitude] for _ in range(13)],
+        "MINUS_G2": [[0.0, -amplitude] for _ in range(13)],
+    }
+
+
+def test_effect_must_exceed_frozen_off_and_numeric_floor() -> None:
+    config = load_g0_config(ROOT / "configs/g0_flow_guidance_primitive.json")
+    quality = {
+        condition: {"OFF_R1": 0.001, "OFF_R2": 0.001}
+        for condition in ("PLUS_G1", "MINUS_G1", "PLUS_G2", "MINUS_G2")
+    }
+    passed = evaluate_g0_metrics(
+        _observations(1.0e-3),
+        gradient_rms={"G1": 1.0, "G2": 1.0},
+        gradient_cosine=0.0,
+        rgb_relative_rms=quality,
+        off_rgb_relative_rms=0.0,
+        config=config,
+    )
+    assert passed["status"] == "FLOW_GUIDANCE_PRIMITIVE_FEASIBLE"
+    failed = evaluate_g0_metrics(
+        _observations(1.0e-8),
+        gradient_rms={"G1": 1.0, "G2": 1.0},
+        gradient_cosine=0.0,
+        rgb_relative_rms=quality,
+        off_rgb_relative_rms=0.0,
+        config=config,
+    )
+    assert failed["status"] == "FLOW_GUIDANCE_PRIMITIVE_NOT_FEASIBLE"
+    assert failed["checks"]["g1_odd_above_floor"] is False
+    json.dumps(failed, allow_nan=False)
