@@ -1,0 +1,120 @@
+{
+  "schema": "sstw.s1.propagation_sensitivity_multipair.v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "method_authority": {
+    "commit": "0fdace4e469717cd40c0e0ab8dce3856b1701231",
+    "tree": "6316078064c73f7379f8ec11e70f6a784db0c514",
+    "raw_sha256": "58891958562eb08f897f2c9bf72ac929ed11a3cca89a130b02a0346e66bcdb50"
+  },
+  "base_s1": {
+    "config_path": "configs/s1_real_dit_relation_primitive.json",
+    "config_raw_sha256": "0dad730be27ef10df9db649e7a6bb57d329ed3be5c7f0aa18677389ad2b5d212",
+    "plan_path": "plans/s1_real_dit_relation_primitive.json",
+    "plan_raw_sha256": "1de73796528c574ba9e8502824cbbb9ee495cbcf1e8f35dcd78642a99dce96e7"
+  },
+  "input_result": {
+    "run_id": "79f92e73ef3a6223",
+    "archive_sha256": "fbedc7cccdb31889621dfc6e228888062a1d22978601c273d753674777bab229",
+    "status": "PAIR_DICTIONARY_NO_GO",
+    "transformer_calls": 10,
+    "all_sixteen_ineligible": true,
+    "temporal_variation_range": [0.75, 1.30]
+  },
+  "frozen_construction": {
+    "blocks": [7, 14, 22],
+    "lambda_total_energy": 1.0,
+    "query_indices": [336,976,1616,2256,2896,3536,4176,4816,5456,6096,6736,7376,8016],
+    "token_grid": [13,20,32],
+    "atomic_pairs": {
+      "horizontal": [2,5],
+      "vertical": [2,8]
+    },
+    "two_pair_signs": ["coherent_sum", "contrast_difference"],
+    "two_pair_coefficients": {
+      "coherent_sum": [0.5,-0.5,0.5,-0.5],
+      "contrast_difference": [0.5,-0.5,-0.5,0.5]
+    },
+    "flow_supports": {
+      "single_step4": {"scheduler_indices": [4], "weights": [1.0]},
+      "three_steps345": {"scheduler_indices": [3,4,5], "weights": [0.5773502691896258,0.5773502691896258,0.5773502691896258]}
+    },
+    "branches": ["cond","uncond"],
+    "guidance_scale": 5.0
+  },
+  "stage1": {
+    "support": "single_step4",
+    "equal_fit_branch_weights": [0.7071067811865475,0.7071067811865475],
+    "construction_count": 12,
+    "construction_order": [
+      "block7:Hcoherent:Vcoherent","block7:Hcoherent:Vcontrast","block7:Hcontrast:Vcoherent","block7:Hcontrast:Vcontrast",
+      "block14:Hcoherent:Vcoherent","block14:Hcoherent:Vcontrast","block14:Hcontrast:Vcoherent","block14:Hcontrast:Vcontrast",
+      "block22:Hcoherent:Vcoherent","block22:Hcoherent:Vcontrast","block22:Hcontrast:Vcoherent","block22:Hcontrast:Vcontrast"
+    ],
+    "usable_rule": "all numeric cells finite and defined; every layer-axis-branch odd RMS positive; relation Jacobian diagonals positive; no new numeric threshold",
+    "ranking": [
+      "worst_velocity_odd_to_noise_or_ulp_desc",
+      "worst_velocity_even_to_odd_asc",
+      "worst_velocity_temporal_total_variation_asc",
+      "worst_guidance_velocity_global_relative_rms_asc",
+      "block_asc","horizontal_sign_order","vertical_sign_order"
+    ]
+  },
+  "cfg_weight_solution": {
+    "source": "selected construction two-axis cond/uncond relation odd and even vectors from the same support",
+    "signal_covariance": "X.T@X where X columns are guidance coefficients times concatenated branch odd vectors",
+    "nuisance_covariance": "Y.T@Y where Y columns are guidance coefficients times concatenated branch even vectors",
+    "solver": "maximum generalized eigenvector using spectral Moore-Penrose nuisance inverse square root",
+    "l2_norm": 1.0,
+    "orientation": "flip the eigenvector sign so aggregate guided own-axis odd is positive for both axes",
+    "degenerate_if": ["signal_rank_lt_2","nuisance_rank_lt_2","maximum_eigenvalue_not_unique","nonfinite","zero_weight","axis_orientation_flip"],
+    "ridge": null,
+    "grid": null,
+    "shared_across_axes_and_all_plus_minus_probes": true
+  },
+  "stage2": {
+    "support_order": ["single_step4","three_steps345"],
+    "single_weight_fit_uses_stage1_selected_unweighted_responses": true,
+    "single_weighted_application_requires_new_calls": true,
+    "three_weight_fit_requires_real_changed_latent_calls": true,
+    "three_weighted_application_requires_new_calls": true,
+    "eligibility": "all existing S1 relation/block/velocity/common/TV/cos/gain/Jacobian/global-quality cells pass",
+    "ranking": [
+      "worst_velocity_odd_to_noise_or_ulp_desc",
+      "worst_velocity_even_to_odd_asc",
+      "worst_velocity_temporal_total_variation_asc",
+      "worst_guidance_velocity_global_relative_rms_asc",
+      "support_order"
+    ]
+  },
+  "thresholds": {
+    "odd_to_noise_or_ulp_minimum": 8.0,
+    "even_to_odd_strict_maximum": 0.25,
+    "axis_absolute_cosine_strict_maximum": 0.5,
+    "axis_gain_ratio_inclusive": [0.25,4.0],
+    "relation_jacobian_cross_ratio_inclusive_maximum": 0.25,
+    "relation_jacobian_diagonal_sign": "positive",
+    "temporal_total_variation_strict_maximum": 0.10,
+    "block_global_relative_rms_strict_maximum": 0.01,
+    "velocity_global_relative_rms_strict_maximum": 0.01,
+    "finite_required": true
+  },
+  "call_budget": {
+    "stage1_shared_prefix": 8,
+    "stage1_shared_step4_off": 4,
+    "stage1_active": 96,
+    "stage1_total": 108,
+    "stage2_single_weighted_apply": 8,
+    "stage2_three_off_continuation_and_terminal_repeats": 6,
+    "stage2_three_unweighted_fit": 24,
+    "stage2_three_weighted_apply": 24,
+    "stage2_total": 62,
+    "full_path_transformer_calls": 170,
+    "possible_terminal_transformer_calls": [108,138,146,162,170],
+    "early_stop_rule": "do not run a weighted application when its analytic CFG solution is invalid; stop after Stage1 at 108 when no construction is usable",
+    "retry_count": 0
+  },
+  "statuses": ["PROPAGATION_CONSTRUCTION_READY","PROPAGATION_CONSTRUCTION_NO_GO","INSTRUMENTATION_INSUFFICIENT"],
+  "forbidden": ["radius_scan","single_pair_scan","lambda_scan","training","ridge","grid","VAE","MP4","S2","proxy_carrier"],
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
