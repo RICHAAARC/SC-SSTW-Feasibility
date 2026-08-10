@@ -4,12 +4,83 @@
 > 方法简称：**SSTW**  
 > 方法形态：**生成式、零比特、单视频盲检测视频水印**  
 > 当前方法结论：`TARGET_METHOD_FEASIBILITY = INSUFFICIENT_TO_DECIDE`  
-> 当前推进位置：`S0 -> S1`  
+> 当前推进位置：`S1 / relation_injector construction recovery`
 > 权威性：本文件是 SSTW 方法身份、实现边界、验证路线与证据解释的唯一权威定义。任何代码、配置、历史实验、笔记本或讨论若与本文件冲突，只能作为历史实现或失败诊断，不得改变 SSTW 方法身份。
 
 ## 项目推进第一性原则
 
 项目推进的唯一目的是验证冻结 SSTW 机制链：S0 construction、S1 真实 DiT relation、S2 saved-MP4 二维观察、S3 AISB/校准/Viterbi，以及 S4 极小样本盲检。不要求且禁止独立审计、各种 Gate、manifest/result gate、provenance/receipt/authorization、环境身份冻结、论文固定 FPR、大样本攻击、复现实验治理、claim ceiling，以及为未来正式实验建设基础设施。只允许为避免代码或接线错误被误判为科学结果而进行最小正确性检查。model revision、真实 relation interface、B1/B2、lambda、Flow support 和结果前冻结 construction 属于被测方法定义并必须保留；torch/CUDA/GPU 名称只作诊断记录，不作身份门。所有证据均为 `DIAGNOSTIC_ONLY`。
+
+## 当前唯一进度快照（2026-08-10）
+
+本节覆盖早期“尚未验证真实 relation interface”的旧描述。后续任务必须先读取本节，不得把历史代理结果、工程故障或某个 construction 的失败解释为整个方法已经成功或失败。
+
+### 已完成的真实 S1 诊断
+
+运行 `0d3223669982a6c3` 在真实 Wan pre-softmax Q/K relation 接口上完成了 exact20 transformer calls，得到：
+
+```text
+S1_NO_GO_THIS_CONSTRUCTION
+```
+
+该结论精确绑定当前 construction：
+
+```text
+block14
++ radius-1 horizontal/vertical single Patch-pairs
++ two local antisymmetric axes B1/B2
++ lambda = 1
++ Flow scheduler index 4 / timestep 749
+```
+
+已确认的正向事实：
+
+- 真实 Wan relation interface 与 native sparse SDPA 接线成立；
+- 局部反对称 logit 写入确实产生双轴 odd response；
+- relation Jacobian 两个对角为正；
+- cross leakage 约 `0.004--0.006`，axis cosine 很低，两个轴未在 relation 层塌缩；
+- exact20 已完整进入真实 transformer，结果不是 OOM、device、shape、序列化或其他工程故障。
+
+当前 construction 的决定性失败：
+
+- relation odd/ULP 仅约 `1.20--5.89`，未达到 `8`；
+- block odd/ULP 仅约 `0.0045--0.032`；
+- velocity odd/ULP 仅约 `0.0666--0.491`；
+- even/odd 约 `1.54--1.66`，未满足 `<0.25`；
+- normalized temporal variation 约 `1.38--1.47`，未满足 `<0.10`；
+- guidance velocity global relative RMS 约 `2.42%--2.46%`，超过 `1%` construction 质量预算。
+
+因此失败位于“relation 信号向 block/velocity 的传播、common-mode、时序稳定性和质量预算无法同时闭合”，而不是 relation interface 完全不可写。
+
+### lambda-only 结论
+
+不得把下一步设为单纯提高 `lambda`。在 `lambda=1` 附近的局部线性外推中：
+
+- velocity odd 达到现有 separation 门槛约需放大 `16--120` 倍；
+- guidance 质量预算反而要求 `lambda <= 0.406--0.413`；
+- normalized even/odd 与 temporal variation 也不会因统一标量放大而得到结构性修复。
+
+这不是对所有 `lambda` 的数学不可能性证明，但信号下界与质量上界已经不相交，足以排除 `lambda-only scan`。`lambda` 后续只能作为新 construction 中的从属能量参数，不能作为主要搜索轴。
+
+### 六模块真实链状态
+
+| 模块 | 当前状态 | 结论边界 |
+| --- | --- | --- |
+| `state_generator` | `IMPLEMENTED_PARTIALLY / NOT_CHAIN_VALIDATED` | 已有 keyed 二维状态公式；完整 trajectory、public burst interleave 与真实生成时序写入尚未验证。 |
+| `relation_injector` | `REAL_VALIDATION_COMPLETED / NO_GO_THIS_CONSTRUCTION` | 真实接口与双轴写入成立；上述 block14/radius1/lambda1/step4 construction 失败，模块家族尚未被否定。 |
+| `relation_observer_2d` | `NOT_VALIDATED` | 尚无真实 saved-MP4 固定二维 observer 的 rank/condition/survival 结论。 |
+| `aisb_acquisition` | `NOT_VALIDATED_ON_TARGET_OBSERVATION` | 历史 pixel/synthetic 成功不是目标链证据。 |
+| `affine_equalizer_2d` | `NOT_VALIDATED_ON_TARGET_OBSERVATION` | 尚未在真实 observer 与冻结 public ambiguity set 上验证。 |
+| `viterbi_detector` | `NOT_VALIDATED_END_TO_END` | 尚未接入真实 observation、wrong-key/null 与最终单视频零比特判断。 |
+
+冻结总状态：
+
+```text
+TARGET_METHOD_FEASIBILITY = INSUFFICIENT_TO_DECIDE
+FIRST_FAILED_STAGE = S1_REAL_DIT_RELATION_PRIMITIVE
+ACTIVE_MODULE = relation_injector
+S2_S3_S4 = HOLD_UNTIL_S1_PASSES
+```
 
 ---
 
@@ -171,20 +242,22 @@ AISB 输出：
 
 ### 6.1 冻结 carrier
 
-Patch-pair dictionary 仅允许作为 construction 工具，不属于运行时方法模块。正式方法只保留两个冻结 basis：
+Patch-pair dictionary 与传播敏感度 screen 仅允许作为 construction 工具，不属于运行时方法模块。正式方法只保留两个冻结 basis：
 
 \[
 B_1,B_2.
 \]
 
-每个 basis 必须作用于真实 DiT relation / attention-logit 计算接口，并在同一 query row 上对一对 Patch token 施加反对称偏置：
+每个 basis 必须作用于真实 DiT relation / attention-logit 计算接口。最小形式是在同一 query row 上对一对 Patch token 施加反对称偏置：
 
 ```text
 Delta b(query, patch_a) = +delta
 Delta b(query, patch_b) = -delta
 ```
 
-两个 basis 必须线性独立、低相关、归一化，并满足 S1 的 odd-response Gate。
+若全部单-pair construction 不能同时满足 S1，允许在同一方法身份内将 basis 收紧为**有限稀疏、多 Patch-pair、零和、归一化的局部反对称方向**。这不是 output/latent/pixel 代理，也不得引入训练式 observer。其支持、系数、block、Flow support 与 CFG branch 配重必须在完整 S1 运行前由一个有限的、结果前冻结的 propagation-sensitivity screen 唯一选定。
+
+两个 basis 必须线性独立、低相关、归一化，并满足 S1 的 odd-response 判据。
 
 ### 6.2 写入规则
 
@@ -489,7 +562,7 @@ confidence = frozen null-tail confidence
 
 ---
 
-## 13. 最小验证路线与 Fail-Closed Gate
+## 13. 最小验证路线与诊断阶段
 
 正式路线压缩为：
 
@@ -513,7 +586,7 @@ S0\rightarrow S1\rightarrow S2\rightarrow S3\rightarrow S4.
 - Viterbi transition set / edit budget；
 - null protocol 与 threshold development split。
 
-未冻结不得进入正式 Gate。
+未冻结不得进入对应方法诊断。
 
 ### S1：真实 DiT relation primitive
 
@@ -537,6 +610,16 @@ B_1/B_2
 -扰动处于预声明质量预算内。
 
 若失败，只允许在 relation interface、Patch pair、basis selection、\(\lambda\) 或 Flow support 内定位。不得切换到 output/latent/pixel 代理。
+
+#### 当前 S1 construction recovery 顺序
+
+当前只允许按以下有限顺序推进；不得并行多路线探索：
+
+1. **单-pair dictionary screen（当前下一 GPU 节点）**：固定 block14、`lambda=1`、Flow step4、同一真实 OFF Q/K，screen 水平/垂直半径 `1..8` 的 16 个单-pair 候选。GPU 预算 exact10，只作解析 relation-level construction 选择，不作 block/velocity/S2 结论。
+2. 若得到唯一双轴候选：冻结其 Patch pairs，并只运行一次新的完整 exact20 S1。
+3. 若无单-pair 组合合格，或新 exact20 仍失败：进入一次**小型传播敏感度 screen**，只允许少量预冻结 block、局部邻域与单步/三步 Flow support；构造两个稀疏多-pair零和 basis，并允许固定 CFG-aware cond/uncond 配重。选择目标是 relation→block→velocity odd gain、低 common-mode、低 temporal variation、双轴低相关与质量预算同时成立。
+4. `lambda` 在该 screen 中仅作固定总能量下的从属线性检查，不得重新成为主搜索轴。多 Flow-step 使用固定总能量，不得通过无限累积扩大扰动。
+5. 唯一胜出 construction 才运行一次完整 S1；若该有限 screen 仍无 construction 通过，则结论为 `UNTRAINED_WAN_PATCH_RELATION_CARRIER_NOT_FEASIBLE`，停止当前无训练 Wan relation-carrier 路线，不得继续堆高 `lambda` 或用历史代理补位。
 
 ### S2：真实 saved-MP4 二维可观测性
 
@@ -752,13 +835,23 @@ C_4:
 + correct-key / wrong-key / clean fixed-FPR zero-bit decision
 ```
 
-因此当前唯一合法下一步是：
+真实链已经进入 S1，并得到一个有效的 construction 负结果。当前唯一合法下一步不再是泛化的“实现 S1”，而是：
 
 ```text
-S0 -> S1
+S1_LOCAL_PAIR_DICTIONARY_EXACT10
 ```
 
-即：实现并验证真实二维局部反对称 DiT Patch-relation primitive。
+即：执行已冻结的 `block14 / lambda1 / Flow step4` 单-pair dictionary screen，水平与垂直半径各 `1..8`，从同一真实 OFF Q/K 解析筛选传播更合适的双轴 Patch pairs。
+
+该节点只允许输出：
+
+```text
+PAIR_DICTIONARY_READY
+PAIR_DICTIONARY_NO_GO
+INSTRUMENTATION_INSUFFICIENT
+```
+
+`PAIR_DICTIONARY_READY` 只允许冻结选中 pair 并进入一次新的 exact20；它本身不是 S1 通过。`PAIR_DICTIONARY_NO_GO` 必须进入第 13 节定义的小型传播敏感度、多-pair零和、CFG-aware、多 Flow-step construction screen，而不是扫描 `lambda`。
 
 在 S1 通过前，不得继续 direct-output、attention-output residual、MLP observer、VAE carrier、pixel carrier、payload 或完整攻击评测路线。
 
@@ -766,11 +859,13 @@ S0 -> S1
 
 ## 18. 版本控制规则
 
-以下改变属于**同一 SSTW 内允许的 construction 调参**，但必须在对应 Gate 前冻结：
+以下改变属于**同一 SSTW 内允许的 construction 变更**，但必须在对应方法诊断前冻结：
 
 - \(B_1,B_2\) 的具体 Patch pair；
+- 单-pair失败后的有限稀疏多-pair零和局部支持与系数；
 - \(\lambda\)；
 -固定 Flow support；
+-固定 CFG cond/uncond branch 配重；
 -状态窗口长度与相位参数；
 -唯一 AISB template 的具体坐标；
 -固定 observer encoder / pair definition；
@@ -818,9 +913,11 @@ S0 -> S1
 
 > **仿射不变捕获与自校准分离的状态空间同步水印。**
 
-当前证据足以支持继续进行 S1/S2 真实可行性验证，但不足以宣称真实端到端方法已经成立。因此冻结状态保持：
+当前证据只足以支持继续在 S1 内进行有限 construction recovery；尚未授权进入 S2，也不足以宣称真实端到端方法已经成立。因此冻结状态更新为：
 
 ```text
 TARGET_METHOD_FEASIBILITY = INSUFFICIENT_TO_DECIDE
-NEXT_GATE = S1_REAL_DIT_RELATION_PRIMITIVE
+FIRST_FAILED_STAGE = S1_REAL_DIT_RELATION_PRIMITIVE
+CURRENT_RESULT = S1_NO_GO_THIS_CONSTRUCTION
+NEXT_DIAGNOSTIC = S1_LOCAL_PAIR_DICTIONARY_EXACT10
 ```
