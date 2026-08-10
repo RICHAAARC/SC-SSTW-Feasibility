@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import inspect
 import json
 import math
 from pathlib import Path
+import sys
 
 import numpy as np
 import pytest
@@ -29,12 +31,16 @@ from sstw.s1_real_dit_relation_primitive import (
     capture_block_output,
     CONDITION_ORDER,
     LAYER_ORDER,
+    NUMERIC_PROBE_SHAPES,
     evaluate_preregistered_statistics,
     load_frozen_inputs,
     runtime_capability_diagnostics,
     S1InstrumentationError,
+    s1_scientific_exit_code,
     transformer_forward_inference,
+    validate_numeric_probe_contract,
     validate_method_runtime_interface,
+    write_s1_scientific_package,
 )
 
 
@@ -530,12 +536,18 @@ def test_sparse_probability_jacobian_has_correct_sign_low_cross_and_common_mode(
 def _synthetic_probe() -> dict[str, object]:
     probe: dict[str, object] = {}
     relation_basis = {
-        "B1": np.tile(np.asarray([[[0.1, 0.0]]]), (13, 1, 1)),
-        "B2": np.tile(np.asarray([[[0.0, 0.1]]]), (13, 1, 1)),
+        "B1": np.tile(np.asarray([[[0.1, 0.0]]]), (13, 12, 1)),
+        "B2": np.tile(np.asarray([[[0.0, 0.1]]]), (13, 12, 1)),
     }
-    flat_basis = {
-        "B1": np.tile(np.asarray([[0.1, 0.0]]), (13, 1)),
-        "B2": np.tile(np.asarray([[0.0, 0.1]]), (13, 1)),
+    block_basis = {
+        "B1": np.full(NUMERIC_PROBE_SHAPES["block"], 0.1),
+        "B2": np.tile(np.concatenate((np.full(768, 0.1), np.full(768, -0.1))), (13, 1)),
+    }
+    velocity_b1 = np.full(NUMERIC_PROBE_SHAPES["velocity"], 0.1)
+    velocity_b2 = np.tile(np.asarray([[[[0.1, -0.1], [0.1, -0.1]]]]), (13, 16, 1, 1))
+    velocity_basis = {
+        "B1": velocity_b1,
+        "B2": velocity_b2,
     }
     for condition in CONDITION_ORDER:
         if condition.endswith("B1"):
@@ -546,19 +558,46 @@ def _synthetic_probe() -> dict[str, object]:
             sign, axis = 0.0, "B1"
         probe[condition] = {}
         for branch in BRANCH_ORDER:
-            base_relation = np.zeros((13, 1, 2))
-            base_flat = np.ones((13, 2))
+            base_relation = np.full(NUMERIC_PROBE_SHAPES["relation"], 0.2)
+            base_block = np.ones(NUMERIC_PROBE_SHAPES["block"])
+            base_velocity = np.ones(NUMERIC_PROBE_SHAPES["velocity"])
             probe[condition][branch] = {
                 "relation": (base_relation + sign * relation_basis[axis]).tolist(),
-                "block": (base_flat + sign * flat_basis[axis]).tolist(),
-                "velocity": (base_flat + sign * flat_basis[axis]).tolist(),
+                "block": (base_block + sign * block_basis[axis]).tolist(),
+                "velocity": (base_velocity + sign * velocity_basis[axis]).tolist(),
             }
     return probe
 
 
+def _global_overrides(value: float = 0.005) -> dict[tuple[str, str, str], float]:
+    return {
+        (branch, layer, axis): value
+        for branch in (*BRANCH_ORDER, "guidance")
+        for layer in ("block", "velocity")
+        for axis in ("B1", "B2")
+    }
+
+
+def _zero_axis(probe: dict[str, object], axis: str) -> None:
+    plus_name, minus_name = (("PLUS_B1", "MINUS_B1") if axis == "B1" else ("PLUS_B2", "MINUS_B2"))
+    for branch in BRANCH_ORDER:
+        for layer in LAYER_ORDER:
+            baseline = (
+                np.asarray(probe["OFF_R1"][branch][layer], dtype=np.float64)
+                + np.asarray(probe["OFF_R2"][branch][layer], dtype=np.float64)
+            ) / 2.0
+            probe[plus_name][branch][layer] = baseline.tolist()
+            probe[minus_name][branch][layer] = baseline.tolist()
+
+
+def _assert_canonical_finite(value: object) -> None:
+    encoded = canonical_json_bytes(value)
+    assert b"NaN" not in encoded and b"Infinity" not in encoded
+
+
 def test_preregistered_O_E_N_gate_is_per_layer_branch_axis() -> None:
     config, _ = load_frozen_inputs(ROOT)
-    overrides = {(branch, layer, axis): 0.005 for branch in (*BRANCH_ORDER, "guidance") for layer in ("block", "velocity") for axis in ("B1", "B2")}
+    overrides = _global_overrides()
     result = evaluate_preregistered_statistics(_synthetic_probe(), config["thresholds"], overrides)
     assert result["all_cells_pass"] is True
     assert set(result["cells"]) == {f"{layer}:{branch}" for branch in (*BRANCH_ORDER, "guidance") for layer in LAYER_ORDER}
@@ -567,12 +606,7 @@ def test_preregistered_O_E_N_gate_is_per_layer_branch_axis() -> None:
 
 def test_normalized_block_temporal_diff_is_nonempty_finite_and_canonical_json_safe() -> None:
     config, _ = load_frozen_inputs(ROOT)
-    overrides = {
-        (branch, layer, axis): 0.005
-        for branch in (*BRANCH_ORDER, "guidance")
-        for layer in ("block", "velocity")
-        for axis in ("B1", "B2")
-    }
+    overrides = _global_overrides()
     probe = _synthetic_probe()
     for condition in CONDITION_ORDER:
         for branch in BRANCH_ORDER:
@@ -586,8 +620,108 @@ def test_normalized_block_temporal_diff_is_nonempty_finite_and_canonical_json_sa
         for axis in ("B1", "B2"):
             temporal_tv = cell["axes"][axis]["temporal_total_variation"]
             assert math.isfinite(temporal_tv)
-    encoded = canonical_json_bytes({"evaluation": result})
-    assert b"NaN" not in encoded and b"Infinity" not in encoded
+    _assert_canonical_finite({"evaluation": result})
+
+
+def test_zero_signal_is_json_safe_scientific_no_go() -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    probe = _synthetic_probe()
+    for condition in CONDITION_ORDER:
+        for branch in BRANCH_ORDER:
+            for layer in LAYER_ORDER:
+                probe[condition][branch][layer] = np.zeros(NUMERIC_PROBE_SHAPES[layer]).tolist()
+    result = evaluate_preregistered_statistics(probe, config["thresholds"], _global_overrides(0.0))
+    assert result["all_cells_pass"] is False
+    for cell in result["cells"].values():
+        assert cell["axis_gain_ratio"] is None
+        assert cell["axis_gain_ratio_status"] == "ZERO_DENOMINATOR"
+        for axis in ("B1", "B2"):
+            assert cell["axes"][axis]["even_to_odd"] is None
+            assert cell["axes"][axis]["temporal_total_variation"] is None
+            assert cell["axes"][axis]["passed"] is False
+    _assert_canonical_finite(result)
+
+
+@pytest.mark.parametrize("zero_axis", ("B1", "B2"))
+def test_single_axis_collapse_is_json_safe_scientific_no_go(zero_axis: str) -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    probe = _synthetic_probe()
+    _zero_axis(probe, zero_axis)
+    result = evaluate_preregistered_statistics(probe, config["thresholds"], _global_overrides())
+    assert result["all_cells_pass"] is False
+    for cell in result["cells"].values():
+        assert cell["axes"][zero_axis]["passed"] is False
+    if zero_axis == "B2":
+        assert all(cell["axis_gain_ratio"] is None for cell in result["cells"].values())
+    _assert_canonical_finite(result)
+
+
+def test_identical_off_repeat_noise_zero_remains_defined_and_can_go() -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    result = evaluate_preregistered_statistics(_synthetic_probe(), config["thresholds"], _global_overrides())
+    assert result["all_cells_pass"] is True
+    assert all(
+        cell["axes"][axis]["noise_rms"] == 0.0
+        and cell["axes"][axis]["odd_to_noise_or_ulp_status"] == "DEFINED"
+        for cell in result["cells"].values()
+        for axis in ("B1", "B2")
+    )
+    _assert_canonical_finite(result)
+
+
+def test_zero_baseline_rms_is_json_safe_no_go_without_override() -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    probe = _synthetic_probe()
+    baseline_by_layer = {"relation": 0.2, "block": 1.0, "velocity": 1.0}
+    for condition in CONDITION_ORDER:
+        for branch in BRANCH_ORDER:
+            for layer, baseline in baseline_by_layer.items():
+                probe[condition][branch][layer] = (
+                    np.asarray(probe[condition][branch][layer], dtype=np.float64) - baseline
+                ).tolist()
+    result = evaluate_preregistered_statistics(probe, config["thresholds"], None)
+    assert result["all_cells_pass"] is False
+    assert any(
+        cell["axes"][axis]["global_relative_rms"] is None
+        and cell["axes"][axis]["global_relative_rms_status"] == "ZERO_DENOMINATOR"
+        for cell in result["cells"].values()
+        for axis in ("B1", "B2")
+    )
+    _assert_canonical_finite(result)
+
+
+@pytest.mark.parametrize("scale", (1e-250, 1e250))
+def test_extreme_finite_probe_remains_json_safe(scale: float) -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    probe = _synthetic_probe()
+    for condition in CONDITION_ORDER:
+        for branch in BRANCH_ORDER:
+            for layer in LAYER_ORDER:
+                probe[condition][branch][layer] = (
+                    np.asarray(probe[condition][branch][layer], dtype=np.float64) * scale
+                ).tolist()
+    result = evaluate_preregistered_statistics(probe, config["thresholds"], _global_overrides())
+    _assert_canonical_finite(result)
+
+
+@pytest.mark.parametrize("bad_value", (math.nan, math.inf, -math.inf))
+def test_nonfinite_probe_is_instrumentation_insufficient_before_evaluation(bad_value: float) -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    probe = _synthetic_probe()
+    probe["PLUS_B1"]["cond"]["block"][0][0] = bad_value
+    with pytest.raises(S1InstrumentationError, match="non-finite"):
+        evaluate_preregistered_statistics(probe, config["thresholds"], _global_overrides())
+
+
+@pytest.mark.parametrize(
+    ("layer", "wrong_shape"),
+    (("relation", (12, 12, 2)), ("block", (13, 1535)), ("velocity", (13, 16, 2, 1))),
+)
+def test_numeric_probe_contract_rejects_layer_shape_drift(layer: str, wrong_shape: tuple[int, ...]) -> None:
+    probe = _synthetic_probe()
+    probe["OFF_R1"]["cond"][layer] = np.zeros(wrong_shape).tolist()
+    with pytest.raises(S1InstrumentationError, match=f"{layer} probe shape"):
+        validate_numeric_probe_contract(probe, _global_overrides())
 
 
 def test_fake_wan_adapter_installs_only_block14_processor() -> None:
@@ -645,3 +779,104 @@ def test_runner_source_freezes_prefix_fork_and_no_VAE_or_MP4_execution() -> None
     assert "S1 transformer output retained an autograd graph" in source
     assert "pipe.scheduler.step(guided, timestep, latents, return_dict=False)[0].detach()" in source
     assert ".vae.decode(" not in source and "encode_saved_mp4" not in source
+
+
+def test_full_chain_shapes_and_json_safe_ratio_contract_are_explicit() -> None:
+    assert NUMERIC_PROBE_SHAPES == {
+        "relation": (13, 12, 2),
+        "block": (13, 1536),
+        "velocity": (13, 16, 2, 2),
+    }
+    validate_numeric_probe_contract(_synthetic_probe(), _global_overrides())
+    source = (ROOT / "src/sstw/s1_real_dit_relation_primitive.py").read_text(encoding="utf-8")
+    assert "math.inf" not in source
+    assert "allow_nan=False" in source
+    assert 'return None, "ZERO_DENOMINATOR"' in source
+    assert 'return None, "NONFINITE_RESULT"' in source
+    assert "output must be absent under an existing regular parent" in source
+
+
+def test_premortem_freezes_s1_to_s2_boundary_without_implementing_s2() -> None:
+    text = (ROOT / "engineering/s1_nonmethod_blocker_premortem.md").read_text(encoding="utf-8")
+    assert "Do not run delivery `4c07fac" in text and "025f2346a837106c" in text
+    assert "block 14" in text and "timestep 749" in text and "lambda 1" in text and "B1/B2" in text
+    assert "one saved MP4 as input" in text and "`T×2` relation observation" in text
+    assert "S2 is not implemented here" in text
+
+
+@pytest.mark.parametrize(("status", "expected_exit"), (("S1_GO", 0), ("S1_NO_GO_THIS_CONSTRUCTION", 3)))
+def test_scientific_package_is_canonical_and_checksum_complete(
+    tmp_path: Path, status: str, expected_exit: int
+) -> None:
+    config, plan = load_frozen_inputs(ROOT)
+    probe = _synthetic_probe()
+    if status == "S1_NO_GO_THIS_CONSTRUCTION":
+        for condition in CONDITION_ORDER:
+            for branch in BRANCH_ORDER:
+                for layer in LAYER_ORDER:
+                    probe[condition][branch][layer] = np.zeros(NUMERIC_PROBE_SHAPES[layer]).tolist()
+    evaluation = evaluate_preregistered_statistics(probe, config["thresholds"], _global_overrides())
+    assert evaluation["all_cells_pass"] is (status == "S1_GO")
+    output = tmp_path / status.lower()
+    output.mkdir()
+    result = write_s1_scientific_package(
+        output=output,
+        config=config,
+        plan=plan,
+        stats={"schema": "test", "evaluation": evaluation},
+        audit={"schema": "test", "status": status, "diagnostic_class": "DIAGNOSTIC_ONLY"},
+        argv=["runner", "--output", str(output)],
+        cwd=tmp_path,
+    )
+    assert result["status"] == status and s1_scientific_exit_code(status) == expected_exit
+    assert json.loads((output / "command.json").read_text())["exit_code"] == expected_exit
+    for name in ("stats.json", "audit.json", "config.json", "plan.json", "command.json"):
+        _assert_canonical_finite(json.loads((output / name).read_text()))
+    checksums = {}
+    for line in (output / "checksums.sha256").read_text().splitlines():
+        digest, name = line.split("  ", 1)
+        checksums[name] = digest
+    assert set(checksums) == {"stats.json", "audit.json", "config.json", "plan.json", "command.json"}
+    assert all(hashlib.sha256((output / name).read_bytes()).hexdigest() == digest for name, digest in checksums.items())
+
+
+def _load_cli_module() -> object:
+    path = ROOT / "experiments/run_s1_real_dit_relation_primitive.py"
+    spec = importlib.util.spec_from_file_location("s1_cli_premortem", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(("status", "expected_exit"), (("S1_GO", 0), ("S1_NO_GO_THIS_CONSTRUCTION", 3)))
+def test_cli_scientific_status_exit_mapping_is_not_exception(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, status: str, expected_exit: int
+) -> None:
+    module = _load_cli_module()
+    monkeypatch.setattr(module, "run_s1_once", lambda **_kwargs: {"status": status, "diagnostic_class": "DIAGNOSTIC_ONLY"})
+    monkeypatch.setattr(sys, "argv", ["runner", "--output", str(tmp_path / "output")])
+    assert module.main() == expected_exit
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == status
+
+
+def test_cli_instrumentation_failure_prints_json_reason(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    module = _load_cli_module()
+
+    def fail(**_kwargs: object) -> object:
+        raise S1InstrumentationError("synthetic non-finite probe")
+
+    monkeypatch.setattr(module, "run_s1_once", fail)
+    monkeypatch.setattr(sys, "argv", ["runner", "--output", str(tmp_path / "output")])
+    assert module.main() == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report == {
+        "formal_result": False,
+        "message": "synthetic non-finite probe",
+        "reason": "S1InstrumentationError",
+        "stage_progression_allowed": False,
+        "status": "INSTRUMENTATION_INSUFFICIENT",
+    }

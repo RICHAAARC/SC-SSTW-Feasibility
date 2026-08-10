@@ -22,6 +22,11 @@ DIAGNOSTIC_CLASS = "DIAGNOSTIC_ONLY"
 CONDITION_ORDER = ("OFF_R1", "OFF_R2", "PLUS_B1", "MINUS_B1", "PLUS_B2", "MINUS_B2")
 BRANCH_ORDER = ("cond", "uncond")
 LAYER_ORDER = ("relation", "block", "velocity")
+NUMERIC_PROBE_SHAPES = {
+    "relation": (13, 12, 2),
+    "block": (13, 1536),
+    "velocity": (13, 16, 2, 2),
+}
 CONDITION_STATES = {
     "OFF_R1": (0.0, 0.0), "OFF_R2": (0.0, 0.0),
     "PLUS_B1": (1.0, 0.0), "MINUS_B1": (-1.0, 0.0),
@@ -110,12 +115,71 @@ def odd_even_noise(records: Mapping[str, Any], axis: str) -> tuple[np.ndarray, n
 
 
 def _rms(value: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(np.square(value, dtype=np.float64), dtype=np.float64)))
+    values = np.asarray(value, dtype=np.float64)
+    if values.size == 0 or not np.isfinite(values).all():
+        raise S1InstrumentationError("RMS input is empty or non-finite")
+    scale = float(np.max(np.abs(values)))
+    if scale == 0.0:
+        return 0.0
+    return float(scale * np.sqrt(np.mean(np.square(values / scale), dtype=np.float64)))
 
 
 def _cosine(left: np.ndarray, right: np.ndarray) -> float:
-    denominator = float(np.linalg.norm(left.ravel()) * np.linalg.norm(right.ravel()))
-    return 0.0 if denominator == 0.0 else float(np.dot(left.ravel(), right.ravel()) / denominator)
+    left_values = np.asarray(left, dtype=np.float64).ravel()
+    right_values = np.asarray(right, dtype=np.float64).ravel()
+    left_scale = float(np.max(np.abs(left_values)))
+    right_scale = float(np.max(np.abs(right_values)))
+    if left_scale == 0.0 or right_scale == 0.0:
+        return 0.0
+    left_scaled = left_values / left_scale
+    right_scaled = right_values / right_scale
+    denominator = float(np.linalg.norm(left_scaled) * np.linalg.norm(right_scaled))
+    value = float(np.dot(left_scaled, right_scaled) / denominator)
+    if not math.isfinite(value):
+        raise S1InstrumentationError("cosine computation became non-finite")
+    return value
+
+
+def _json_safe_ratio(numerator: float, denominator: float) -> tuple[float | None, str]:
+    if denominator == 0.0:
+        return None, "ZERO_DENOMINATOR"
+    value = numerator / denominator
+    if not math.isfinite(value):
+        return None, "NONFINITE_RESULT"
+    return float(value), "DEFINED"
+
+
+def validate_numeric_probe_contract(
+    probe: Mapping[str, Any],
+    global_relative_overrides: Mapping[tuple[str, str, str], float] | None,
+) -> None:
+    """Validate the exact CPU numeric contract before any scientific ratio."""
+
+    if set(probe) != set(CONDITION_ORDER):
+        raise S1InstrumentationError("numeric probe condition set changed")
+    for condition in CONDITION_ORDER:
+        if set(probe[condition]) != set(BRANCH_ORDER):
+            raise S1InstrumentationError("numeric probe branch set changed")
+        for branch in BRANCH_ORDER:
+            if set(probe[condition][branch]) != set(LAYER_ORDER):
+                raise S1InstrumentationError("numeric probe layer set changed")
+            for layer, expected_shape in NUMERIC_PROBE_SHAPES.items():
+                value = np.asarray(probe[condition][branch][layer], dtype=np.float64)
+                if value.shape != expected_shape or value.shape[0] != 13:
+                    raise S1InstrumentationError(f"{layer} probe shape must be exact {expected_shape}")
+                if not np.isfinite(value).all():
+                    raise S1InstrumentationError(f"{layer} probe contains non-finite values")
+    if global_relative_overrides is not None:
+        expected = {
+            (branch, layer, axis)
+            for branch in (*BRANCH_ORDER, "guidance")
+            for layer in ("block", "velocity")
+            for axis in ("B1", "B2")
+        }
+        if set(global_relative_overrides) != expected:
+            raise S1InstrumentationError("global relative-RMS override set changed")
+        if not all(math.isfinite(float(value)) and float(value) >= 0.0 for value in global_relative_overrides.values()):
+            raise S1InstrumentationError("global relative-RMS override is non-finite or negative")
 
 
 def evaluate_preregistered_statistics(
@@ -125,6 +189,7 @@ def evaluate_preregistered_statistics(
 ) -> dict[str, Any]:
     """Evaluate every layer x branch cell without cross-cell averaging."""
 
+    validate_numeric_probe_contract(probe, global_relative_overrides)
     branch_inputs: dict[str, dict[str, dict[str, Any]]] = {}
     for branch in (*BRANCH_ORDER, "guidance"):
         branch_inputs[branch] = {}
@@ -151,30 +216,43 @@ def evaluate_preregistered_statistics(
                 odd_vectors[axis] = odd
                 odd_rms, even_rms, noise_rms, baseline_rms = map(_rms, (odd, even, noise, baseline))
                 ulp_floor = max(float(np.max(np.abs(baseline))) * (2.0 ** -7), 2.0 ** -133)
-                separation = odd_rms / max(noise_rms, ulp_floor)
-                even_ratio = math.inf if odd_rms == 0.0 else even_rms / odd_rms
-                temporal_tv = math.inf if odd_rms == 0.0 else _rms(np.diff(odd, axis=0)) / odd_rms
-                relative_rms = math.inf if baseline_rms == 0.0 else odd_rms / baseline_rms
+                separation_denominator = max(noise_rms, ulp_floor)
+                separation, separation_status = _json_safe_ratio(odd_rms, separation_denominator)
+                even_ratio, even_ratio_status = _json_safe_ratio(even_rms, odd_rms)
+                temporal_numerator = _rms(np.diff(odd, axis=0))
+                temporal_tv, temporal_tv_status = _json_safe_ratio(temporal_numerator, odd_rms)
+                relative_rms, relative_rms_status = _json_safe_ratio(odd_rms, baseline_rms)
                 if global_relative_overrides is not None and (branch, layer, axis) in global_relative_overrides:
                     relative_rms = float(global_relative_overrides[(branch, layer, axis)])
+                    relative_rms_status = "OVERRIDE_DEFINED"
                 axis_pass = (
-                    separation >= float(thresholds["odd_to_noise_or_ulp_minimum"])
+                    separation is not None
+                    and even_ratio is not None
+                    and temporal_tv is not None
+                    and separation >= float(thresholds["odd_to_noise_or_ulp_minimum"])
                     and even_ratio < float(thresholds["even_to_odd_strict_maximum"])
                     and temporal_tv < float(thresholds["temporal_total_variation_strict_maximum"])
                 )
                 if layer in {"block", "velocity"}:
-                    axis_pass = axis_pass and math.isfinite(relative_rms) and relative_rms < float(thresholds[f"{layer}_global_relative_rms_strict_maximum"])
+                    axis_pass = axis_pass and relative_rms is not None and relative_rms < float(thresholds[f"{layer}_global_relative_rms_strict_maximum"])
                 axes[axis] = {
                     "odd_rms": odd_rms, "even_rms": even_rms, "noise_rms": noise_rms,
                     "baseline_rms": baseline_rms, "bfloat16_ulp_floor": ulp_floor,
-                    "odd_to_noise_or_ulp": separation, "even_to_odd": even_ratio,
-                    "temporal_total_variation": temporal_tv, "global_relative_rms": relative_rms,
+                    "odd_to_noise_or_ulp": separation, "odd_to_noise_or_ulp_denominator": separation_denominator,
+                    "odd_to_noise_or_ulp_status": separation_status,
+                    "even_to_odd": even_ratio, "even_to_odd_denominator": odd_rms,
+                    "even_to_odd_status": even_ratio_status,
+                    "temporal_total_variation": temporal_tv, "temporal_total_variation_numerator": temporal_numerator,
+                    "temporal_total_variation_denominator": odd_rms, "temporal_total_variation_status": temporal_tv_status,
+                    "global_relative_rms": relative_rms, "global_relative_rms_denominator": baseline_rms,
+                    "global_relative_rms_status": relative_rms_status,
                     "passed": bool(axis_pass),
                 }
             axis_cosine = abs(_cosine(odd_vectors["B1"], odd_vectors["B2"]))
-            gain_ratio = axes["B1"]["odd_rms"] / axes["B2"]["odd_rms"] if axes["B2"]["odd_rms"] else math.inf
+            gain_ratio, gain_ratio_status = _json_safe_ratio(axes["B1"]["odd_rms"], axes["B2"]["odd_rms"])
             pair_pass = (
-                axis_cosine < float(thresholds["axis_absolute_cosine_strict_maximum"])
+                gain_ratio is not None
+                and axis_cosine < float(thresholds["axis_absolute_cosine_strict_maximum"])
                 and float(thresholds["axis_gain_ratio_inclusive"][0]) <= gain_ratio <= float(thresholds["axis_gain_ratio_inclusive"][1])
             )
             relation_jacobian = None
@@ -183,20 +261,30 @@ def evaluate_preregistered_statistics(
                 j21 = float(np.mean(odd_vectors["B1"][..., 1]))
                 j12 = float(np.mean(odd_vectors["B2"][..., 0]))
                 j22 = float(np.mean(odd_vectors["B2"][..., 1]))
-                cross = max(abs(j21) / max(abs(j11), 1e-30), abs(j12) / max(abs(j22), 1e-30))
-                jacobian_pass = j11 > 0.0 and j22 > 0.0 and cross <= float(thresholds["relation_jacobian_cross_ratio_inclusive_maximum"])
-                relation_jacobian = {"matrix_columns_B1_B2": [[j11, j12], [j21, j22]], "maximum_cross_ratio": cross, "passed": jacobian_pass}
+                cross_1, cross_1_status = _json_safe_ratio(abs(j21), max(abs(j11), 1e-30))
+                cross_2, cross_2_status = _json_safe_ratio(abs(j12), max(abs(j22), 1e-30))
+                cross = None if cross_1 is None or cross_2 is None else max(cross_1, cross_2)
+                jacobian_pass = j11 > 0.0 and j22 > 0.0 and cross is not None and cross <= float(thresholds["relation_jacobian_cross_ratio_inclusive_maximum"])
+                relation_jacobian = {
+                    "matrix_columns_B1_B2": [[j11, j12], [j21, j22]],
+                    "maximum_cross_ratio": cross,
+                    "cross_ratio_status": [cross_1_status, cross_2_status],
+                    "passed": jacobian_pass,
+                }
                 pair_pass = pair_pass and jacobian_pass
             cell_pass = pair_pass and all(record["passed"] for record in axes.values())
             all_pass = all_pass and cell_pass
             cells[f"{layer}:{branch}"] = {
                 "axes": axes, "axis_absolute_cosine": axis_cosine, "axis_gain_ratio": gain_ratio,
+                "axis_gain_ratio_denominator": axes["B2"]["odd_rms"], "axis_gain_ratio_status": gain_ratio_status,
                 "relation_jacobian": relation_jacobian, "passed": bool(cell_pass),
             }
     return {"cells": cells, "all_cells_pass": bool(all_pass)}
 
 
 def _extract_velocity_slice(value: Any) -> Any:
+    if tuple(value.shape) != (1, 16, 13, 40, 64):
+        raise S1InstrumentationError("velocity output must be exact [1,16,13,40,64]")
     torch = __import__("torch")
     slices = []
     for query in TARGET_QUERY_INDICES:
@@ -205,7 +293,10 @@ def _extract_velocity_slice(value: Any) -> Any:
         height = remainder // 32
         width = remainder % 32
         slices.append(value[0, :, temporal, height * 2 : height * 2 + 2, width * 2 : width * 2 + 2])
-    return torch.stack(slices, dim=0).detach().float().cpu()
+    output = torch.stack(slices, dim=0)
+    if tuple(output.shape) != NUMERIC_PROBE_SHAPES["velocity"]:
+        raise S1InstrumentationError("velocity probe must be exact [13,16,2,2]")
+    return output.detach().float().cpu()
 
 
 def capture_block_output(block_output: Any, torch: Any) -> tuple[Any, float, Any]:
@@ -223,6 +314,8 @@ def capture_block_output(block_output: Any, torch: Any) -> tuple[Any, float, Any
     target_rows = target_rows.detach().float().cpu()
     full = block_output.detach().float().cpu()
     global_rms = float(full.square().mean().sqrt().item())
+    if not math.isfinite(global_rms):
+        raise S1InstrumentationError("block global RMS is non-finite")
     return target_rows, global_rms, full
 
 
@@ -350,6 +443,51 @@ def _load_runtime(config: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
                "transformer_source": str(transformer_source), "transformer_source_sha256": sha256_file(transformer_source),
                "pipeline_source": str(pipeline_source), "pipeline_source_sha256": sha256_file(pipeline_source)}
     return pipe, torch, runtime
+
+
+def s1_scientific_exit_code(status: str) -> int:
+    if status == "S1_GO":
+        return 0
+    if status == "S1_NO_GO_THIS_CONSTRUCTION":
+        return 3
+    raise S1InstrumentationError("unknown S1 scientific status")
+
+
+def write_s1_scientific_package(
+    *,
+    output: Path,
+    config: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    stats: Mapping[str, Any],
+    audit: Mapping[str, Any],
+    argv: Sequence[str],
+    cwd: Path,
+) -> dict[str, Any]:
+    """Write a JSON-safe GO/NO_GO package; instrumentation errors stay on the CLI path."""
+
+    status = str(audit.get("status"))
+    exit_code = s1_scientific_exit_code(status)
+    payloads = {
+        "stats.json": stats,
+        "audit.json": audit,
+        "config.json": config,
+        "plan.json": plan,
+        "command.json": {"argv": list(argv), "cwd": str(cwd.resolve()), "exit_code": exit_code},
+    }
+    for name, payload in payloads.items():
+        (output / name).write_bytes(canonical_json_bytes(payload) + b"\n")
+    files = sorted(path for path in output.iterdir() if path.is_file())
+    (output / "checksums.sha256").write_text(
+        "".join(f"{sha256_file(path)}  {path.name}\n" for path in files), encoding="utf-8"
+    )
+    return {
+        "status": status,
+        "diagnostic_class": DIAGNOSTIC_CLASS,
+        "output": str(output),
+        "transformer_calls": 20,
+        "formal_result": False,
+        "stage_progression_allowed": False,
+    }
 
 
 def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path) -> dict[str, Any]:
@@ -538,14 +676,14 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
                  "runtime": runtime, "transformer_calls": len(call_records), "scheduler_steps": 4,
                  "VAE_was_run": False, "MP4_was_written": False, "formal_result": False, "stage_progression_allowed": False,
                  "started_at": started_at, "ended_at": utc_now()}
-        (output / "stats.json").write_bytes(canonical_json_bytes(stats) + b"\n")
-        (output / "audit.json").write_bytes(canonical_json_bytes(audit) + b"\n")
-        (output / "config.json").write_bytes(canonical_json_bytes(config) + b"\n")
-        (output / "plan.json").write_bytes(canonical_json_bytes(plan) + b"\n")
-        (output / "command.json").write_bytes(canonical_json_bytes({"argv": list(argv), "cwd": str(cwd.resolve()), "exit_code": 0}) + b"\n")
-        files = sorted(path for path in output.iterdir() if path.is_file())
-        (output / "checksums.sha256").write_text("".join(f"{sha256_file(path)}  {path.name}\n" for path in files), encoding="utf-8")
-        return {"status": status, "diagnostic_class": DIAGNOSTIC_CLASS, "output": str(output), "transformer_calls": 20,
-                "formal_result": False, "stage_progression_allowed": False}
+        return write_s1_scientific_package(
+            output=output,
+            config=config,
+            plan=plan,
+            stats=stats,
+            audit=audit,
+            argv=argv,
+            cwd=cwd,
+        )
     except Exception:
         raise

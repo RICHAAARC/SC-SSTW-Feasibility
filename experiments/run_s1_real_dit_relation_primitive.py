@@ -12,7 +12,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from sstw.s1_real_dit_relation_primitive import S1InstrumentationError, run_s1_once  # noqa: E402
+from sstw.s1_real_dit_relation_primitive import (  # noqa: E402
+    S1InstrumentationError,
+    run_s1_once,
+    s1_scientific_exit_code,
+)
 
 
 def main() -> int:
@@ -27,7 +31,7 @@ def main() -> int:
                           "formal_result": False, "stage_progression_allowed": False}, sort_keys=True))
         return 2
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0 if result["status"] == "S1_GO" else 3
+    return s1_scientific_exit_code(result["status"])
 
 
 if __name__ == "__main__":
