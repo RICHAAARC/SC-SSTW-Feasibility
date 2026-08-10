@@ -22,10 +22,14 @@ from sstw.s1_propagation_sensitivity_multipair import (  # noqa: E402
     STATUS_READY,
     S1InstrumentationError,
     all_basis_updates,
+    assert_scheduler_snapshot_unchanged,
+    capture_scheduler_snapshot,
+    fork_scheduler_snapshot,
     install_processor,
     load_inputs,
     propagation_exit_code,
     solve_cfg_weights,
+    scheduler_state_summary,
     stage1_ranking,
     two_pair_basis,
     validate_processor_record,
@@ -81,9 +85,9 @@ def _zero_numeric_probe() -> dict[str, object]:
 def test_authority_inputs_and_frozen_budget() -> None:
     config, plan, base = load_inputs(ROOT)
     assert config["method_authority"] == {
-        "commit": "0fdace4e469717cd40c0e0ab8dce3856b1701231",
-        "tree": "6316078064c73f7379f8ec11e70f6a784db0c514",
-        "raw_sha256": "58891958562eb08f897f2c9bf72ac929ed11a3cca89a130b02a0346e66bcdb50",
+        "commit": "0f85bd70de6f042c68560ed348722fc4fbd112e9",
+        "tree": "d791cff7b5cbebb6ec690f16196bde9ee6d50bd1",
+        "raw_sha256": "85c32f49897a6b7c6248d5fd6fe4c7a307b4b841dc7388551d095854b6189292",
     }
     assert _sha(ROOT / "SSTW_METHOD_AUTHORITY.md") == config["method_authority"]["raw_sha256"]
     assert config["input_result"]["run_id"] == "79f92e73ef3a6223"
@@ -128,6 +132,132 @@ def test_cfg_zero_or_rank_deficient_is_invalid() -> None:
             probe[condition][branch]["relation"] = np.zeros((13, 12, 2)).tolist()
     with pytest.raises(S1InstrumentationError, match="rank deficient"):
         solve_cfg_weights(probe)
+
+
+class _FakeTorch:
+    @staticmethod
+    def is_tensor(_value: object) -> bool:
+        return False
+
+
+class _StatefulFakeUniPC:
+    order = 1
+
+    def __init__(self, step_index: int) -> None:
+        self._step_index = step_index
+        self.lower_order_nums = step_index
+        self.model_outputs = [np.asarray([float(index), float(step_index)]) for index in range(3)]
+        self.timestep_list = [index for index in range(step_index)]
+        self.last_sample = np.asarray([float(step_index)])
+        self.config = {"solver_order": 3, "solver_type": "bh2"}
+
+    def step(self, _model_output: object, timestep: int, sample: np.ndarray, *, return_dict: bool) -> tuple[np.ndarray]:
+        assert return_dict is False
+        this_order = 0 if timestep != self._step_index else min(3, self.lower_order_nums + 1)
+        assert this_order > 0
+        self.model_outputs.pop(0)
+        self.model_outputs.append(np.asarray([float(timestep), float(sample.sum())]))
+        self.timestep_list.append(timestep)
+        self.last_sample = sample.copy()
+        self.lower_order_nums = min(self.lower_order_nums + 1, 3)
+        self._step_index += 1
+        return (sample + float(timestep + 1),)
+
+
+def test_stateful_scheduler_reuse_reproduces_failure_but_independent_forks_pass() -> None:
+    torch = _FakeTorch()
+    retained, summary = capture_scheduler_snapshot(
+        _StatefulFakeUniPC(3), torch, expected_step_index=3, label="step3"
+    )
+    shared = fork_scheduler_snapshot(retained, summary, torch, label="old_shared")
+    latent = np.asarray([1.0, 2.0])
+    for timestep in (3, 4):
+        latent = shared.step(None, timestep, latent, return_dict=False)[0]
+    with pytest.raises(AssertionError):
+        shared.step(None, 3, np.asarray([1.0, 2.0]), return_dict=False)
+
+    starts = []
+    finishes = []
+    for condition in ("PLUS_B1", "MINUS_B1", "PLUS_B2", "MINUS_B2"):
+        fork = fork_scheduler_snapshot(retained, summary, torch, label=condition)
+        condition_latent = np.asarray([1.0, 2.0])
+        starts.append(hashlib.sha256(condition_latent.tobytes()).hexdigest())
+        for timestep in (3, 4):
+            condition_latent = fork.step(None, timestep, condition_latent, return_dict=False)[0]
+        finishes.append(condition_latent.copy())
+        assert_scheduler_snapshot_unchanged(retained, summary, torch, label=condition)
+    assert len(set(starts)) == 1
+    assert all(np.array_equal(value, finishes[0]) for value in finishes)
+
+
+def test_step3_fit_apply_and_step4_off_forks_do_not_mutate_snapshots() -> None:
+    torch = _FakeTorch()
+    step3, step3_summary = capture_scheduler_snapshot(
+        _StatefulFakeUniPC(3), torch, expected_step_index=3, label="step3"
+    )
+    step4, step4_summary = capture_scheduler_snapshot(
+        _StatefulFakeUniPC(4), torch, expected_step_index=4, label="step4"
+    )
+    for purpose in ("three_fit", "three_apply"):
+        for condition in ("PLUS_B1", "MINUS_B1", "PLUS_B2", "MINUS_B2"):
+            fork = fork_scheduler_snapshot(step3, step3_summary, torch, label=f"{purpose}:{condition}")
+            sample = np.asarray([0.0])
+            for timestep in (3, 4):
+                sample = fork.step(None, timestep, sample, return_dict=False)[0]
+            assert_scheduler_snapshot_unchanged(step3, step3_summary, torch, label=purpose)
+    off = fork_scheduler_snapshot(step4, step4_summary, torch, label="off")
+    off.step(None, 4, np.asarray([0.0]), return_dict=False)
+    assert_scheduler_snapshot_unchanged(step4, step4_summary, torch, label="off")
+    assert scheduler_state_summary(step3, torch) == step3_summary
+    assert scheduler_state_summary(step4, torch) == step4_summary
+
+
+def test_scheduler_snapshot_requires_history_and_preserves_full_170_budget() -> None:
+    class MissingHistory:
+        _step_index = 3
+
+    with pytest.raises(S1InstrumentationError, match="history fields unavailable"):
+        scheduler_state_summary(MissingHistory(), _FakeTorch())
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    budget = config["call_budget"]
+    assert budget["stage1_shared_prefix"] + budget["stage1_shared_step4_off"] + budget["stage1_active"] == 108
+    assert 108 + budget["stage2_single_weighted_apply"] + budget["stage2_three_off_continuation_and_terminal_repeats"] + budget["stage2_three_unweighted_fit"] + budget["stage2_three_weighted_apply"] == 170
+    assert budget["possible_terminal_transformer_calls"] == [108, 138, 146, 162, 170]
+
+
+def test_stateful_fake_executes_full_170_call_schedule_with_isolated_forks() -> None:
+    torch = _FakeTorch()
+    step3, step3_summary = capture_scheduler_snapshot(
+        _StatefulFakeUniPC(3), torch, expected_step_index=3, label="step3"
+    )
+    step4, step4_summary = capture_scheduler_snapshot(
+        _StatefulFakeUniPC(4), torch, expected_step_index=4, label="step4"
+    )
+    calls = 108
+    calls += 4 * 2  # selected single-step weighted application
+
+    off = fork_scheduler_snapshot(step4, step4_summary, torch, label="three_off")
+    calls += 2  # cond/uncond step-4 forward
+    off.step(None, 4, np.asarray([0.0]), return_dict=False)
+    calls += 2 * 2  # two step-5 OFF repeats on both branches
+    assert_scheduler_snapshot_unchanged(step4, step4_summary, torch, label="three_off")
+
+    start_hashes = []
+    for purpose in ("three_fit", "three_apply"):
+        for condition_index, condition in enumerate(("PLUS_B1", "MINUS_B1", "PLUS_B2", "MINUS_B2")):
+            fork = fork_scheduler_snapshot(step3, step3_summary, torch, label=f"{purpose}:{condition}")
+            latent = np.asarray([1.0, 2.0])
+            start_hashes.append(hashlib.sha256(latent.tobytes()).hexdigest())
+            for timestep in (3, 4, 5):
+                calls += 2  # cond/uncond real forward
+                if timestep != 5:
+                    # Distinct carriers may produce distinct later latents; the common
+                    # starting latent and scheduler history are the frozen contract.
+                    model_output = np.asarray([float(condition_index), float(timestep)])
+                    latent = fork.step(model_output, timestep, latent, return_dict=False)[0]
+            assert_scheduler_snapshot_unchanged(step3, step3_summary, torch, label=purpose)
+    assert len(set(start_hashes)) == 1
+    assert calls == 170
 
 
 def test_no_signal_stage1_is_json_safe_and_unusable() -> None:
@@ -184,6 +314,10 @@ def test_static_real_call_graph_and_no_proxy() -> None:
     assert "call_count not in config" in source
     assert "torch.inference_mode()" in source
     assert "capture_block_output" in source and "_extract_velocity_slice" in source
+    assert "copy.deepcopy(snapshot)" in source
+    assert "condition_scheduler.step" in source
+    assert "off_scheduler.step" in source
+    assert "pipe.scheduler.step(guided, timesteps[step], condition_latent" not in source
     for forbidden in ("vae.decode", "encode_video", "saved.mp4", "lambda_scan"):
         assert forbidden not in source.lower()
 

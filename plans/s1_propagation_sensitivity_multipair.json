@@ -2,20 +2,20 @@
   "schema": "sstw.s1.propagation_sensitivity_multipair.plan.v1",
   "diagnostic_class": "DIAGNOSTIC_ONLY",
   "method_authority": {
-    "commit": "0fdace4e469717cd40c0e0ab8dce3856b1701231",
-    "tree": "6316078064c73f7379f8ec11e70f6a784db0c514",
-    "raw_sha256": "58891958562eb08f897f2c9bf72ac929ed11a3cca89a130b02a0346e66bcdb50"
+    "commit": "0f85bd70de6f042c68560ed348722fc4fbd112e9",
+    "tree": "d791cff7b5cbebb6ec690f16196bde9ee6d50bd1",
+    "raw_sha256": "85c32f49897a6b7c6248d5fd6fe4c7a307b4b841dc7388551d095854b6189292"
   },
   "execution_order": [
-    "run shared OFF prefix through scheduler index 3 and retain step3 and step4 latents",
+    "run shared OFF prefix and retain complete deep scheduler snapshots with the step3 and step4 latent clones",
     "record two shared step4 OFF probes",
     "run twelve single-step constructions with B1 plus/minus and B2 plus/minus on both CFG branches",
     "select one usable Stage1 construction by frozen lexicographic ranking",
     "derive its single-step CFG weight from Stage1 relation responses",
     "rerun that single support with the derived weight",
-    "continue the shared OFF trajectory to step5 and record two terminal OFF probes",
-    "run unweighted three-step changed-latent trajectories to derive the three-step CFG weight",
-    "rerun weighted three-step changed-latent trajectories",
+    "fork the retained step4 scheduler snapshot once for OFF continuation to step5 and record two terminal OFF probes",
+    "fork the retained step3 scheduler snapshot independently for every unweighted three-step changed-latent condition",
+    "fork the same retained step3 scheduler snapshot independently for every weighted three-step condition",
     "evaluate both supports and publish one construction or no-go"
   ],
   "stage1_constructions": 12,

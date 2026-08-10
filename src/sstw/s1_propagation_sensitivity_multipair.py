@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -48,10 +50,109 @@ RELATION_BANK_INDEX = {
     ("B2", "coherent_sum"): 2,
     ("B2", "contrast_difference"): 3,
 }
+SCHEDULER_HISTORY_FIELDS = (
+    "_step_index",
+    "order",
+    "lower_order_nums",
+    "model_outputs",
+    "timestep_list",
+    "last_sample",
+)
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _scheduler_state_value(value: Any, torch: Any) -> Any:
+    """Return a stable, JSON-safe representation of scheduler state."""
+    if torch.is_tensor(value):
+        return {
+            "kind": "tensor",
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+            "device": str(value.device),
+            "sha256": sha256_tensor(value),
+        }
+    if isinstance(value, np.ndarray):
+        contiguous = np.ascontiguousarray(value)
+        return {
+            "kind": "ndarray",
+            "shape": list(contiguous.shape),
+            "dtype": str(contiguous.dtype),
+            "sha256": hashlib.sha256(contiguous.tobytes()).hexdigest(),
+        }
+    if isinstance(value, Mapping):
+        return {str(key): _scheduler_state_value(item, torch) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_scheduler_state_value(item, torch) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return {"kind": f"{type(value).__module__}.{type(value).__qualname__}", "repr": repr(value)}
+
+
+def scheduler_state_summary(scheduler: Any, torch: Any) -> dict[str, Any]:
+    """Fingerprint the complete instance state and the UniPC history fields."""
+    missing = [name for name in ("_step_index", "lower_order_nums", "model_outputs") if not hasattr(scheduler, name)]
+    if missing:
+        raise S1InstrumentationError(f"scheduler history fields unavailable: {missing}")
+    instance_state = {
+        str(name): _scheduler_state_value(value, torch)
+        for name, value in sorted(vars(scheduler).items())
+    }
+    digest = hashlib.sha256(canonical_json_bytes(instance_state)).hexdigest()
+    history = {
+        name: _scheduler_state_value(getattr(scheduler, name), torch)
+        for name in SCHEDULER_HISTORY_FIELDS
+        if hasattr(scheduler, name)
+    }
+    return {
+        "state_sha256": digest,
+        "state_keys": sorted(instance_state),
+        "history": history,
+    }
+
+
+def capture_scheduler_snapshot(
+    scheduler: Any,
+    torch: Any,
+    *,
+    expected_step_index: int,
+    label: str,
+) -> tuple[Any, dict[str, Any]]:
+    """Deep-copy a stateful scheduler without reconstructing it from config."""
+    actual_step_index = getattr(scheduler, "_step_index", None)
+    if actual_step_index != expected_step_index:
+        raise S1InstrumentationError(
+            f"{label} scheduler step index mismatch: expected {expected_step_index}, got {actual_step_index}"
+        )
+    source_summary = scheduler_state_summary(scheduler, torch)
+    try:
+        snapshot = copy.deepcopy(scheduler)
+    except Exception as exc:
+        raise S1InstrumentationError(f"{label} scheduler deep snapshot failed") from exc
+    snapshot_summary = scheduler_state_summary(snapshot, torch)
+    if snapshot_summary != source_summary:
+        raise S1InstrumentationError(f"{label} scheduler deep snapshot lost history")
+    return snapshot, snapshot_summary
+
+
+def fork_scheduler_snapshot(snapshot: Any, expected: Mapping[str, Any], torch: Any, *, label: str) -> Any:
+    """Create one condition-local scheduler and leave the retained snapshot untouched."""
+    if scheduler_state_summary(snapshot, torch) != expected:
+        raise S1InstrumentationError(f"{label} retained scheduler snapshot was mutated")
+    try:
+        fork = copy.deepcopy(snapshot)
+    except Exception as exc:
+        raise S1InstrumentationError(f"{label} scheduler fork failed") from exc
+    if scheduler_state_summary(fork, torch) != expected:
+        raise S1InstrumentationError(f"{label} scheduler fork lost history")
+    return fork
+
+
+def assert_scheduler_snapshot_unchanged(snapshot: Any, expected: Mapping[str, Any], torch: Any, *, label: str) -> None:
+    if scheduler_state_summary(snapshot, torch) != expected:
+        raise S1InstrumentationError(f"{label} retained scheduler snapshot was mutated")
 
 
 def two_pair_basis(axis: str, sign: str) -> tuple[tuple[tuple[int, float], ...], ...]:
@@ -339,7 +440,7 @@ def load_inputs(repo_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[s
     plan_path = repo_root / "plans/s1_propagation_sensitivity_multipair.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    authority = {"commit": "0fdace4e469717cd40c0e0ab8dce3856b1701231", "tree": "6316078064c73f7379f8ec11e70f6a784db0c514", "raw_sha256": "58891958562eb08f897f2c9bf72ac929ed11a3cca89a130b02a0346e66bcdb50"}
+    authority = {"commit": "0f85bd70de6f042c68560ed348722fc4fbd112e9", "tree": "d791cff7b5cbebb6ec690f16196bde9ee6d50bd1", "raw_sha256": "85c32f49897a6b7c6248d5fd6fe4c7a307b4b841dc7388551d095854b6189292"}
     if config.get("schema") != SCHEMA or plan.get("schema") != PLAN_SCHEMA or config.get("method_authority") != authority or plan.get("method_authority") != authority:
         raise S1InstrumentationError("propagation config/plan authority changed")
     if sha256_file(repo_root / "SSTW_METHOD_AUTHORITY.md") != authority["raw_sha256"]:
@@ -398,9 +499,14 @@ def run_propagation_once(*, repo_root: Path, output: Path, argv: Sequence[str], 
         return transformer_forward_inference(torch, transformer, branch=branch, hidden_states=latent.clone().to(transformer.dtype), timestep=timesteps[step].expand(1), encoder_hidden_states=embeddings)
 
     latent_at_step3 = None
+    scheduler_at_step3 = None
+    scheduler_at_step3_summary = None
     for step in range(4):
         if step == 3:
             latent_at_step3 = latents.detach().clone()
+            scheduler_at_step3, scheduler_at_step3_summary = capture_scheduler_snapshot(
+                pipe.scheduler, torch, expected_step_index=3, label="step3"
+            )
         cond_velocity = plain_forward(latents, step, "cond")
         uncond_velocity = plain_forward(latents, step, "uncond")
         with torch.inference_mode():
@@ -408,10 +514,23 @@ def run_propagation_once(*, repo_root: Path, output: Path, argv: Sequence[str], 
             latents = pipe.scheduler.step(guided, timesteps[step], latents, return_dict=False)[0].detach()
         del cond_velocity, uncond_velocity, guided
     latent_at_step4 = latents.detach().clone()
-    if latent_at_step3 is None:
-        raise S1InstrumentationError("step3 latent was not retained")
+    scheduler_at_step4, scheduler_at_step4_summary = capture_scheduler_snapshot(
+        pipe.scheduler, torch, expected_step_index=4, label="step4"
+    )
+    if latent_at_step3 is None or scheduler_at_step3 is None or scheduler_at_step3_summary is None:
+        raise S1InstrumentationError("step3 latent and scheduler were not retained")
+    scheduler_forks: list[dict[str, Any]] = []
 
-    def run_calls(block: int, horizontal_sign: str, vertical_sign: str, support: str, branch_weights: Mapping[str, float], off_records: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def run_calls(
+        block: int,
+        horizontal_sign: str,
+        vertical_sign: str,
+        support: str,
+        branch_weights: Mapping[str, float],
+        off_records: Mapping[str, Any] | None = None,
+        *,
+        fork_purpose: str | None = None,
+    ) -> dict[str, Any]:
         nonlocal call_count
         processor, original = install_processor(transformer, torch, block)
         target_block = transformer.blocks[block]
@@ -430,35 +549,68 @@ def run_propagation_once(*, repo_root: Path, output: Path, argv: Sequence[str], 
                 axis, condition_sign = _condition_axis(condition)
                 basis_sign = horizontal_sign if axis == "B1" else vertical_sign
                 condition_latent = (latent_at_step4 if support == "single_step4" else latent_at_step3).detach().clone()
-                for step, flow_weight in zip(steps, flow_weights, strict=True):
-                    velocities = {}
-                    kept = {}
-                    for branch in BRANCH_ORDER:
-                        call_count += 1
-                        keep = step == steps[-1]
-                        processor.set_context(call_index=call_count, scheduler_index=step, branch=branch, active_axis=axis, active_sign=basis_sign, amplitude=condition_sign * float(branch_weights[branch]) * flow_weight, capture=keep)
-                        before = len(processor.records)
-                        captures.clear()
-                        keep_block["value"] = keep
-                        embeddings = cond_embeddings if branch == "cond" else uncond_embeddings
-                        velocity = transformer_forward_inference(torch, transformer, branch=branch, hidden_states=condition_latent.clone().to(transformer.dtype), timestep=timesteps[step].expand(1), encoder_hidden_states=embeddings)
-                        if len(processor.records) != before + 1 or len(captures) != (1 if keep else 0):
-                            raise S1InstrumentationError("processor or block capture count mismatch")
-                        validate_processor_record(processor.records[-1], active=True, captured=keep)
-                        velocities[branch] = velocity
-                        if keep:
-                            block_rows, block_rms, block_full = captures[0]
-                            kept[branch] = {
-                                "relation_bank": processor.records[-1]["relation_bank"], "block": block_rows.tolist(),
-                                "velocity": _extract_velocity_slice(velocity).tolist(), "block_global_rms": block_rms,
-                                "_block_full": block_full, "_velocity_full": velocity.detach().float().cpu(),
+                condition_scheduler = None
+                initial_latent_sha256 = sha256_tensor(condition_latent)
+                if support == "three_steps345":
+                    if fork_purpose not in ("three_fit", "three_apply"):
+                        raise S1InstrumentationError("three-step scheduler fork purpose is invalid")
+                    condition_scheduler = fork_scheduler_snapshot(
+                        scheduler_at_step3,
+                        scheduler_at_step3_summary,
+                        torch,
+                        label=f"{fork_purpose}:{condition}",
+                    )
+                try:
+                    for step, flow_weight in zip(steps, flow_weights, strict=True):
+                        velocities = {}
+                        kept = {}
+                        for branch in BRANCH_ORDER:
+                            call_count += 1
+                            keep = step == steps[-1]
+                            processor.set_context(call_index=call_count, scheduler_index=step, branch=branch, active_axis=axis, active_sign=basis_sign, amplitude=condition_sign * float(branch_weights[branch]) * flow_weight, capture=keep)
+                            before = len(processor.records)
+                            captures.clear()
+                            keep_block["value"] = keep
+                            embeddings = cond_embeddings if branch == "cond" else uncond_embeddings
+                            velocity = transformer_forward_inference(torch, transformer, branch=branch, hidden_states=condition_latent.clone().to(transformer.dtype), timestep=timesteps[step].expand(1), encoder_hidden_states=embeddings)
+                            if len(processor.records) != before + 1 or len(captures) != (1 if keep else 0):
+                                raise S1InstrumentationError("processor or block capture count mismatch")
+                            validate_processor_record(processor.records[-1], active=True, captured=keep)
+                            velocities[branch] = velocity
+                            if keep:
+                                block_rows, block_rms, block_full = captures[0]
+                                kept[branch] = {
+                                    "relation_bank": processor.records[-1]["relation_bank"], "block": block_rows.tolist(),
+                                    "velocity": _extract_velocity_slice(velocity).tolist(), "block_global_rms": block_rms,
+                                    "_block_full": block_full, "_velocity_full": velocity.detach().float().cpu(),
+                                }
+                        if step != steps[-1]:
+                            if condition_scheduler is None:
+                                raise S1InstrumentationError("stateful scheduler fork is missing")
+                            with torch.inference_mode():
+                                guided = velocities["uncond"] + GUIDANCE * (velocities["cond"] - velocities["uncond"])
+                                condition_latent = condition_scheduler.step(guided, timesteps[step], condition_latent, return_dict=False)[0].detach()
+                        del velocities
+                    result[condition] = kept
+                finally:
+                    if condition_scheduler is not None:
+                        assert_scheduler_snapshot_unchanged(
+                            scheduler_at_step3,
+                            scheduler_at_step3_summary,
+                            torch,
+                            label=f"{fork_purpose}:{condition}",
+                        )
+                        scheduler_forks.append(
+                            {
+                                "purpose": fork_purpose,
+                                "condition": condition,
+                                "start_step_index": 3,
+                                "initial_latent_sha256": initial_latent_sha256,
+                                "snapshot_state_sha256": scheduler_at_step3_summary["state_sha256"],
+                                "snapshot_unchanged": True,
                             }
-                    if step != steps[-1]:
-                        with torch.inference_mode():
-                            guided = velocities["uncond"] + GUIDANCE * (velocities["cond"] - velocities["uncond"])
-                            condition_latent = pipe.scheduler.step(guided, timesteps[step], condition_latent, return_dict=False)[0].detach()
-                    del velocities
-                result[condition] = kept
+                        )
+                        condition_scheduler = None
         finally:
             hook.remove()
             target_block.attn1.set_processor(original)
@@ -548,6 +700,12 @@ def run_propagation_once(*, repo_root: Path, output: Path, argv: Sequence[str], 
         hook = target_block.register_forward_hook(lambda _module, _inputs, value: captures.append(capture_block_output(value, torch)))
         try:
             off_step5_latent = latent_at_step4.detach().clone()
+            off_scheduler = fork_scheduler_snapshot(
+                scheduler_at_step4,
+                scheduler_at_step4_summary,
+                torch,
+                label="three_off_continuation",
+            )
             velocities = {}
             for branch in BRANCH_ORDER:
                 call_count += 1
@@ -558,7 +716,24 @@ def run_propagation_once(*, repo_root: Path, output: Path, argv: Sequence[str], 
                 validate_processor_record(processor.records[-1], active=False, captured=False)
             with torch.inference_mode():
                 guided = velocities["uncond"] + GUIDANCE * (velocities["cond"] - velocities["uncond"])
-                off_step5_latent = pipe.scheduler.step(guided, timesteps[4], off_step5_latent, return_dict=False)[0].detach()
+                off_step5_latent = off_scheduler.step(guided, timesteps[4], off_step5_latent, return_dict=False)[0].detach()
+            assert_scheduler_snapshot_unchanged(
+                scheduler_at_step4,
+                scheduler_at_step4_summary,
+                torch,
+                label="three_off_continuation",
+            )
+            scheduler_forks.append(
+                {
+                    "purpose": "three_off_continuation",
+                    "condition": "OFF",
+                    "start_step_index": 4,
+                    "initial_latent_sha256": sha256_tensor(latent_at_step4),
+                    "snapshot_state_sha256": scheduler_at_step4_summary["state_sha256"],
+                    "snapshot_unchanged": True,
+                }
+            )
+            del off_scheduler
             del velocities, guided
             three_off = {"OFF_R1": {}, "OFF_R2": {}}
             for repeat in ("OFF_R1", "OFF_R2"):
@@ -579,7 +754,10 @@ def run_propagation_once(*, repo_root: Path, output: Path, argv: Sequence[str], 
         finally:
             hook.remove()
             target_block.attn1.set_processor(original)
-        three_fit_records = run_calls(block, horizontal_sign, vertical_sign, "three_steps345", equal_fit_weights, three_off)
+        three_fit_records = run_calls(
+            block, horizontal_sign, vertical_sign, "three_steps345", equal_fit_weights, three_off,
+            fork_purpose="three_fit",
+        )
         try:
             three_weight = solve_cfg_weights(_numeric_probe(three_fit_records, horizontal_sign, vertical_sign))
         except S1InstrumentationError as exc:
@@ -587,7 +765,10 @@ def run_propagation_once(*, repo_root: Path, output: Path, argv: Sequence[str], 
             three_evaluation = None
         else:
             three_weight["valid"] = True
-            three_records = run_calls(block, horizontal_sign, vertical_sign, "three_steps345", three_weight["weights"], three_off)
+            three_records = run_calls(
+                block, horizontal_sign, vertical_sign, "three_steps345", three_weight["weights"], three_off,
+                fork_purpose="three_apply",
+            )
             three_evaluation = evaluate_records(three_records, horizontal_sign, vertical_sign, config["thresholds"])
             del three_records
         del three_fit_records
@@ -610,7 +791,21 @@ def run_propagation_once(*, repo_root: Path, output: Path, argv: Sequence[str], 
 
     if call_count not in config["call_budget"]["possible_terminal_transformer_calls"]:
         raise S1InstrumentationError(f"finite call budget mismatch: {call_count}")
-    stats = {"schema": SCHEMA, "diagnostic_class": DIAGNOSTIC_CLASS, "initial_latent_sha256": sha256_tensor(latent_at_step3), "scheduler_timesteps": actual_timesteps, "transformer_calls": call_count, "stage1": stage1, "stage2_supports": supports, "selected_construction": selected}
+    stats = {
+        "schema": SCHEMA,
+        "diagnostic_class": DIAGNOSTIC_CLASS,
+        "initial_latent_sha256": sha256_tensor(latent_at_step3),
+        "scheduler_timesteps": actual_timesteps,
+        "scheduler_snapshots": {
+            "step3": scheduler_at_step3_summary,
+            "step4": scheduler_at_step4_summary,
+        },
+        "scheduler_forks": scheduler_forks,
+        "transformer_calls": call_count,
+        "stage1": stage1,
+        "stage2_supports": supports,
+        "selected_construction": selected,
+    }
     audit = {"schema": SCHEMA, "diagnostic_class": DIAGNOSTIC_CLASS, "status": status, "source": {"head": _git(repo_root, "rev-parse", "HEAD"), "tree": _git(repo_root, "rev-parse", "HEAD^{tree}"), "dirty": False}, "runtime": runtime, "transformer_calls": call_count, "VAE_was_run": False, "MP4_was_written": False, "S2_was_run": False, "formal_result": False, "stage_progression_allowed": False, "started_at": started, "ended_at": utc_now()}
     payloads = {"stats.json": stats, "audit.json": audit, "config.json": config, "plan.json": plan, "command.json": {"argv": list(argv), "cwd": str(cwd), "exit_code": propagation_exit_code(status)}}
     for name, payload in payloads.items():
