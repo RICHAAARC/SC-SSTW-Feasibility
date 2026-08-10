@@ -16,10 +16,12 @@
     "transformer": "diffusers.WanTransformer3DModel",
     "dtype": "torch.bfloat16"
   },
-  "software": {
+  "method_interface": {
+    "diffusers": "0.35.2"
+  },
+  "notebook_install_suggestions": {
     "python": "3.11",
     "accelerate": "1.4.0",
-    "diffusers": "0.35.2",
     "ftfy": "6.3.1",
     "huggingface_hub": "0.35.3",
     "numpy": "1.26.4",

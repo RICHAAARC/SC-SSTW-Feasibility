@@ -28,6 +28,7 @@ from sstw.s1_real_dit_relation_primitive import (
     load_frozen_inputs,
     runtime_capability_diagnostics,
     S1InstrumentationError,
+    validate_method_runtime_interface,
 )
 
 
@@ -43,7 +44,12 @@ def test_authority_config_conditions_and_exact20_are_frozen() -> None:
     config, plan = load_frozen_inputs(ROOT)
     assert config["runtime_capabilities"] == {"cuda_available": True, "bf16_supported": True}
     assert "required_gpu" not in config["model"] and "required_cuda_bf16" not in config["model"]
-    assert "torch" not in config["software"] and "cuda" not in config["software"]
+    assert config["method_interface"] == {"diffusers": "0.35.2"}
+    assert config["notebook_install_suggestions"] == {
+        "python": "3.11", "accelerate": "1.4.0", "ftfy": "6.3.1",
+        "huggingface_hub": "0.35.3", "numpy": "1.26.4", "safetensors": "0.5.3",
+        "transformers": "4.49.0",
+    }
     assert config["conditions"] == list(CONDITION_ORDER)
     assert config["call_budget"] == {
         "prefix_steps": [0, 1, 2, 3], "prefix_branches": ["cond", "uncond"],
@@ -104,17 +110,58 @@ class _FakeTorch:
 
 def test_runtime_gate_is_capability_only_and_keeps_environment_diagnostic() -> None:
     torch = _FakeTorch(available=True, bf16=True, name="Arbitrary Future GPU")
-    assert runtime_capability_diagnostics(torch) == {
+    assert runtime_capability_diagnostics(
+        torch,
+        python_version="3.12.99",
+        auxiliary_packages={"accelerate": "99.1.7", "transformers": "88.4.2"},
+    ) == {
         "cuda_available": True,
         "bf16_supported": True,
         "torch": "2.99.0+future",
         "cuda": "13.7-diagnostic",
         "gpu": "Arbitrary Future GPU",
+        "python": "3.12.99",
+        "auxiliary_packages": {"accelerate": "99.1.7", "transformers": "88.4.2"},
     }
     with pytest.raises(S1InstrumentationError, match="CUDA and BF16"):
         runtime_capability_diagnostics(_FakeTorch(available=False, bf16=True, name="CPU"))
     with pytest.raises(S1InstrumentationError, match="CUDA and BF16"):
         runtime_capability_diagnostics(_FakeTorch(available=True, bf16=False, name="Any GPU"))
+
+
+def _method_interface_kwargs(config: dict[str, object]) -> dict[str, str]:
+    topology = config["source_topology"]
+    assert isinstance(topology, dict)
+    return {
+        "diffusers_version": "0.35.2",
+        "transformer_source_sha256": str(topology["transformer_wan_raw_sha256"]),
+        "pipeline_source_sha256": str(topology["pipeline_wan_raw_sha256"]),
+        "relation_callsite": "transformer.blocks[14].attn1.processor",
+        "processor_class": "WanAttnProcessor",
+    }
+
+
+def test_only_diffusers_and_wan_relation_interface_are_method_gates() -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    validate_method_runtime_interface(config, **_method_interface_kwargs(config))
+
+
+@pytest.mark.parametrize(
+    ("field", "drift"),
+    (
+        ("diffusers_version", "0.35.3"),
+        ("transformer_source_sha256", "0" * 64),
+        ("pipeline_source_sha256", "1" * 64),
+        ("relation_callsite", "transformer.blocks[15].attn1.processor"),
+        ("processor_class", "DifferentProcessor"),
+    ),
+)
+def test_diffusers_source_topology_and_relation_callsite_drift_are_rejected(field: str, drift: str) -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    observed = _method_interface_kwargs(config)
+    observed[field] = drift
+    with pytest.raises(S1InstrumentationError, match="method interface|source topology"):
+        validate_method_runtime_interface(config, **observed)
 
 
 def test_production_runtime_and_notebook_have_no_exact_environment_blocker() -> None:
@@ -136,6 +183,9 @@ def test_production_runtime_and_notebook_have_no_exact_environment_blocker() -> 
     assert "torch.cuda.is_available()" in code and "torch.cuda.is_bf16_supported()" in code
     assert "diffusers==0.35.2" in code
     assert "0fad780a534b6463e45facd96134c9f345acfa5b" in code
+    source = paths[1].read_text(encoding="utf-8")
+    assert "notebook_install_suggestions" not in source
+    assert "software_diagnostics !=" not in source and "locked_software" not in source
 
 
 def test_frozen_geometry_has_13_queries_two_orthogonal_unit_pairs() -> None:

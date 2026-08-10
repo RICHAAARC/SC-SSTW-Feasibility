@@ -208,7 +208,12 @@ def _extract_velocity_slice(value: Any) -> Any:
     return torch.stack(slices, dim=0).detach().float().cpu()
 
 
-def runtime_capability_diagnostics(torch: Any) -> dict[str, Any]:
+def runtime_capability_diagnostics(
+    torch: Any,
+    *,
+    python_version: str | None = None,
+    auxiliary_packages: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """Require only the CUDA and BF16 capabilities used by the S1 construction."""
 
     cuda_available = bool(torch.cuda.is_available())
@@ -219,10 +224,35 @@ def runtime_capability_diagnostics(torch: Any) -> dict[str, Any]:
         "torch": str(torch.__version__),
         "cuda": None if torch.version.cuda is None else str(torch.version.cuda),
         "gpu": None if not cuda_available else str(torch.cuda.get_device_name(0)),
+        "python": platform.python_version() if python_version is None else str(python_version),
+        "auxiliary_packages": dict(auxiliary_packages or {}),
     }
     if not cuda_available or not bf16_supported:
         raise S1InstrumentationError("S1 requires CUDA and BF16 capabilities")
     return diagnostics
+
+
+def validate_method_runtime_interface(
+    config: Mapping[str, Any],
+    *,
+    diffusers_version: str,
+    transformer_source_sha256: str,
+    pipeline_source_sha256: str,
+    relation_callsite: str,
+    processor_class: str,
+) -> None:
+    """Check only the Wan relation interface that is part of the S1 construction."""
+
+    topology = config["source_topology"]
+    if diffusers_version != config.get("method_interface", {}).get("diffusers"):
+        raise S1InstrumentationError("S1 diffusers method interface changed")
+    if (
+        transformer_source_sha256 != topology["transformer_wan_raw_sha256"]
+        or pipeline_source_sha256 != topology["pipeline_wan_raw_sha256"]
+        or relation_callsite != topology["relation_callsite"]
+        or processor_class != topology["processor_class"]
+    ):
+        raise S1InstrumentationError("S1 Wan relation source topology changed")
 
 
 def _load_runtime(config: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
@@ -231,24 +261,21 @@ def _load_runtime(config: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
         from diffusers import WanPipeline, WanTransformer3DModel
         from huggingface_hub import snapshot_download
     except Exception as exc:
-        raise S1InstrumentationError("locked S1 CUDA dependencies unavailable") from exc
-    locked_software = config["software"]
-    software_diagnostics = {
-        "python": f"{platform.python_version_tuple()[0]}.{platform.python_version_tuple()[1]}",
+        raise S1InstrumentationError("S1 runtime dependencies unavailable") from exc
+    auxiliary_diagnostics = {
         "accelerate": accelerate.__version__, "diffusers": diffusers.__version__, "ftfy": ftfy.__version__,
         "huggingface_hub": huggingface_hub.__version__, "numpy": np.__version__,
         "safetensors": safetensors.__version__, "transformers": transformers.__version__,
     }
-    if software_diagnostics != locked_software:
-        raise S1InstrumentationError(f"locked method dependency mismatch: {software_diagnostics}")
-    runtime_capabilities = runtime_capability_diagnostics(torch)
+    runtime_capabilities = runtime_capability_diagnostics(
+        torch,
+        python_version=platform.python_version(),
+        auxiliary_packages=auxiliary_diagnostics,
+    )
     if config.get("runtime_capabilities") != {"cuda_available": True, "bf16_supported": True}:
         raise S1InstrumentationError("S1 runtime capability definition changed")
     transformer_source = Path(inspect.getsourcefile(WanTransformer3DModel) or "").resolve(strict=True)
     pipeline_source = Path(inspect.getsourcefile(WanPipeline) or "").resolve(strict=True)
-    topology = config["source_topology"]
-    if sha256_file(transformer_source) != topology["transformer_wan_raw_sha256"] or sha256_file(pipeline_source) != topology["pipeline_wan_raw_sha256"]:
-        raise S1InstrumentationError("installed diffusers Wan source identity mismatch")
     snapshot = Path(snapshot_download(repo_id=config["model"]["id"], revision=config["model"]["revision"], local_files_only=True))
     resolved = snapshot.resolve(strict=True)
     if snapshot.is_symlink() or not snapshot.is_dir() or resolved.name != config["model"]["revision"]:
@@ -258,6 +285,14 @@ def _load_runtime(config: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
     transformer = pipe.transformer
     identity = config["transformer_identity"]
     target = transformer.blocks[identity["block_index"]].attn1
+    validate_method_runtime_interface(
+        config,
+        diffusers_version=diffusers.__version__,
+        transformer_source_sha256=sha256_file(transformer_source),
+        pipeline_source_sha256=sha256_file(pipeline_source),
+        relation_callsite=f"transformer.blocks[{identity['block_index']}].attn1.processor",
+        processor_class=type(target.processor).__name__,
+    )
     if (
         not isinstance(transformer, WanTransformer3DModel)
         or len(transformer.blocks) != identity["block_count"]
@@ -268,7 +303,7 @@ def _load_runtime(config: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
         or str(transformer.dtype) != config["model"]["dtype"]
     ):
         raise S1InstrumentationError("real Wan transformer structure mismatch")
-    runtime = {**software_diagnostics, **runtime_capabilities, "model_snapshot": str(resolved),
+    runtime = {**runtime_capabilities, "model_snapshot": str(resolved),
                "transformer_type": type(transformer).__name__, "block_type": type(transformer.blocks[14]).__name__,
                "attention_type": type(target).__name__, "execution_device": str(pipe._execution_device),
                "transformer_source": str(transformer_source), "transformer_source_sha256": sha256_file(transformer_source),
