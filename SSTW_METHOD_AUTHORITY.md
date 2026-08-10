@@ -69,7 +69,7 @@ PAIR_DICTIONARY_NO_GO
 
 该结果排除的是 `block14 + lambda1 + Flow step4` 下的有限 radius1--8 单-pair字典。它进一步表明当前主要矛盾是时序稳定性，而不是单纯换一个更远的 Patch pair 即可解决。下一步不得扩大 radius 或重复单-pair扫描。
 
-### propagation screen 首次执行的工程状态
+### propagation screen 首次执行的工程状态与最终结论
 
 运行 `7f9f1484e9c30627` 在进入 Stage2 three-step changed-latent 路径时触发 `UniPCMultistepScheduler.this_order` 断言。根因是多个 condition 复用了同一个已经推进过内部历史的 scheduler，而不是每个 condition 从同一 step3/step4 scheduler state 独立分叉。
 
@@ -82,6 +82,25 @@ NEXT_ACTION = FIX_SCHEDULER_STATE_FORK_AND_RERUN_SAME_FROZEN_SCREEN
 ```
 
 修复只允许保存前缀对应的 scheduler state，并为每个 OFF/axis/sign/branch condition 独立恢复；候选、basis、CFG公式、Flow support、阈值、调用预算和排序必须零变化。
+
+修复版运行 `ff43e8be9475cbdb` 已在 NVIDIA L4 上完整完成 `170` 次 transformer calls，正常返回：
+
+```text
+PROPAGATION_CONSTRUCTION_NO_GO
+selected_construction = null
+```
+
+结果包为 `sstw-s1-propagation-ff43e8be9475cbdb.zip`，SHA-256 为 `42a313580214f397315734906c9c70662b87c09cdb37cf4ce4d0f1d193af228c`。这是修复后的有效有限 construction-screen 负结果，不是 scheduler、OOM、device、shape、序列化或调用预算失败。本机 Drive 挂载当前不可读，逐 block/basis/support 数值待结果包恢复可读时只读补录；不得据此重跑、扩大候选或改变 screen 定义。
+
+依照预先冻结停止规则，有限 blocks 7/14/22、two-pair zero-sum basis、single/three-step support 和无参数 CFG weighting 中不存在可进入 exact20 的 construction。因此：
+
+```text
+UNTRAINED_WAN_PATCH_RELATION_CARRIER = NOT_FEASIBLE
+S1_PROPAGATION_SCREEN = PROPAGATION_CONSTRUCTION_NO_GO
+S2_S3_S4 = STOPPED_FOR_THIS_CARRIER_ROUTE
+```
+
+该结论否定的是当前**无训练 Wan Patch-relation carrier**路线；它不是对二维状态、AISB、public-only calibration、Viterbi 或未来另行定义的生成模型/训练式 carrier 路线的否定。禁止再扫描 lambda、半径、更多 Patch pair、更多 block 或更多 Flow support 以延续本路线。
 
 ### lambda-only 结论
 
@@ -866,25 +885,9 @@ C_4:
 + correct-key / wrong-key / clean fixed-FPR zero-bit decision
 ```
 
-真实链已经进入 S1，并得到一个 exact20 construction 负结果及一个有效的单-pair字典负结果。当前唯一合法下一步是：
+真实链已完成 exact20、single-pair dictionary 与 propagation-sensitivity screen；最后一项有效返回 `PROPAGATION_CONSTRUCTION_NO_GO`。当前无训练 Wan Patch-relation carrier 路线结束，不再存在可执行的 S1 construction recovery。S2/S3/S4 不得启动；也不得继续 direct-output、attention-output residual、MLP observer、VAE carrier、pixel carrier、payload 或完整攻击评测路线。
 
-```text
-S1_PROPAGATION_SENSITIVITY_SCREEN
-```
-
-即：执行第 13 节定义的一次有限小型 construction screen，从传播敏感度而不是 relation 几何半径出发，选择稀疏多-pair零和二维 basis、有限 Flow support 与 CFG-aware branch 配重。
-
-该节点的 construction-screen 终态只允许输出：
-
-```text
-PROPAGATION_CONSTRUCTION_READY
-PROPAGATION_CONSTRUCTION_NO_GO
-INSTRUMENTATION_INSUFFICIENT
-```
-
-`PROPAGATION_CONSTRUCTION_READY` 只允许冻结唯一 construction 并进入一次新的完整 S1；它本身不是 S1 通过。`PROPAGATION_CONSTRUCTION_NO_GO` 直接触发 `UNTRAINED_WAN_PATCH_RELATION_CARRIER_NOT_FEASIBLE`，不得再扫描 `lambda`、扩大字典或增加新代理。
-
-在 S1 通过前，不得继续 direct-output、attention-output residual、MLP observer、VAE carrier、pixel carrier、payload 或完整攻击评测路线。
+下一动作只能是：在不继承失败 construction 的前提下，先定义一个新的方法版本或明确停止整个项目。任何新路线必须重新冻结 carrier family、模型/训练边界和最小单视频盲检问题，不能把本路线的历史 proxy 结果包装为正证据。
 
 ---
 
@@ -944,13 +947,13 @@ INSTRUMENTATION_INSUFFICIENT
 
 > **仿射不变捕获与自校准分离的状态空间同步水印。**
 
-当前证据只足以支持继续在 S1 内进行有限 construction recovery；尚未授权进入 S2，也不足以宣称真实端到端方法已经成立。因此冻结状态更新为：
+当前证据已经用尽 S1 内预先冻结的有限 construction recovery；未授权进入 S2，也不足以宣称真实端到端方法已经成立。因此冻结状态更新为：
 
 ```text
-TARGET_METHOD_FEASIBILITY = INSUFFICIENT_TO_DECIDE
+TARGET_METHOD_FEASIBILITY = NOT_FEASIBLE_FOR_UNTRAINED_WAN_PATCH_RELATION_ROUTE
 FIRST_FAILED_STAGE = S1_REAL_DIT_RELATION_PRIMITIVE
 CURRENT_S1_RESULT = S1_NO_GO_THIS_CONSTRUCTION
-CURRENT_CONSTRUCTION_SCREEN_RESULT = PAIR_DICTIONARY_NO_GO
-NEXT_DIAGNOSTIC = S1_PROPAGATION_SENSITIVITY_SCREEN
-LAST_EXECUTION = ENGINEERING_SCHEDULER_FORK_INVALID
+CURRENT_CONSTRUCTION_SCREEN_RESULT = PROPAGATION_CONSTRUCTION_NO_GO
+NEXT_DIAGNOSTIC = NONE_PENDING_NEW_METHOD_VERSION_OR_PROJECT_STOP
+LAST_EXECUTION = PROPAGATION_CONSTRUCTION_NO_GO
 ```
