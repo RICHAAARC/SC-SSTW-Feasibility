@@ -20,7 +20,6 @@ from .s1_real_dit_relation_primitive import (
     _load_runtime,
     _rms,
     canonical_json_bytes,
-    load_frozen_inputs,
     sha256_file,
     sha256_parameters,
     sha256_tensor,
@@ -396,16 +395,25 @@ def load_dictionary_inputs(repo_root: Path) -> tuple[dict[str, Any], dict[str, A
     plan_path = repo_root / "plans/s1_local_pair_dictionary.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    base_config, base_plan = load_frozen_inputs(repo_root)
     if config.get("schema") != SCHEMA or plan.get("schema") != PLAN_SCHEMA:
         raise S1InstrumentationError("dictionary config or plan identity changed")
     base = config.get("base_s1", {})
+    expected_authority = {
+        "commit": "b53ed1c23a91f0798e1955e55f53daea2298ed75",
+        "tree": "91bb9c99b1d4a49faf46a5eb92bd41573719e7f5",
+        "raw_sha256": "4013eb61c8b8d3165729e4f89ecc0936e05a734511227a44a818ea0ae850688f",
+    }
     if (
         sha256_file(repo_root / base["config_path"]) != base["config_raw_sha256"]
         or sha256_file(repo_root / base["plan_path"]) != base["plan_raw_sha256"]
         or sha256_file(repo_root / "SSTW_METHOD_AUTHORITY.md") != base["authority_raw_sha256"]
+        or {"commit": base.get("authority_commit"), "tree": base.get("authority_tree"), "raw_sha256": base.get("authority_raw_sha256")}
+        != expected_authority
+        or plan.get("method_authority") != expected_authority
     ):
         raise S1InstrumentationError("base S1 identity changed")
+    base_config = json.loads((repo_root / base["config_path"]).read_text(encoding="utf-8"))
+    base_plan = json.loads((repo_root / base["plan_path"]).read_text(encoding="utf-8"))
     construction = config.get("frozen_construction", {})
     if (
         construction.get("block_index"), construction.get("scheduler_index"), construction.get("expected_timestep"),

@@ -6,7 +6,9 @@
     "config_raw_sha256": "0dad730be27ef10df9db649e7a6bb57d329ed3be5c7f0aa18677389ad2b5d212",
     "plan_path": "plans/s1_real_dit_relation_primitive.json",
     "plan_raw_sha256": "1de73796528c574ba9e8502824cbbb9ee495cbcf1e8f35dcd78642a99dce96e7",
-    "authority_raw_sha256": "a34cad7f174ab8103ac7c54795393164f1ed74e559927da1198e18abb8836d18"
+    "authority_commit": "b53ed1c23a91f0798e1955e55f53daea2298ed75",
+    "authority_tree": "91bb9c99b1d4a49faf46a5eb92bd41573719e7f5",
+    "authority_raw_sha256": "4013eb61c8b8d3165729e4f89ecc0936e05a734511227a44a818ea0ae850688f"
   },
   "input_result": {
     "run_id": "0d3223669982a6c3",

@@ -2,6 +2,8 @@
 
 This is a `DIAGNOSTIC_ONLY` S0 construction-selection tool. It does not change the SSTW method identity, does not freeze a replacement B1/B2 before the screen result, and does not enter S2.
 
+The unique method authority for this delivery is commit `b53ed1c23a91f0798e1955e55f53daea2298ed75`, tree `91bb9c99b1d4a49faf46a5eb92bd41573719e7f5`, and raw `SSTW_METHOD_AUTHORITY.md` SHA-256 `4013eb61c8b8d3165729e4f89ecc0936e05a734511227a44a818ea0ae850688f`. It fixes the current node as `S1_LOCAL_PAIR_DICTIONARY_EXACT10`.
+
 ## Registered prior result
 
 Run `0d3223669982a6c3`, archive SHA-256 `07a4c137382ce67aaf16d1775ea244287568a7c2d7d3fedcc5fa104a75a31cdb`, source `e8923e5de8b752ed3211af98c4120340acdea100`, ended in valid `S1_NO_GO_THIS_CONSTRUCTION` with exact20 and structural checks passing.
@@ -30,4 +32,4 @@ An axis/radius is eligible only when cond and uncond both pass odd/ULP, even/odd
 
 Every eligible horizontal/vertical combination must also pass both branches' axis cosine, gain ratio, positive Jacobian diagonal and cross leakage. Combination ranking is uniquely: maximize the worst axis/branch separation, minimize the worst axis/branch even ratio, minimize the worst axis/branch TV, then horizontal radius, then vertical radius.
 
-No eligible combination yields `PAIR_DICTIONARY_NO_GO`; exact20 is not run and lambda/Flow are not scanned. A unique combination yields `PAIR_DICTIONARY_READY`, which is only a construction candidate to freeze in a later task.
+No eligible combination yields `PAIR_DICTIONARY_NO_GO`; exact20 is not run and lambda/Flow are not scanned. A unique combination yields `PAIR_DICTIONARY_READY`, which only permits freezing that pair and running one new exact20. `PAIR_DICTIONARY_NO_GO` permits one finite propagation-sensitivity construction screen over a predeclared multi-pair zero-sum, CFG-aware, single/three-Flow-step family. If that finite screen still has no solution, the untrained Wan Patch-relation carrier route stops. S2 remains HOLD throughout this dictionary screen.

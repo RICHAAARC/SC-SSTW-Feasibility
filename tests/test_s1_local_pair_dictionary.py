@@ -26,6 +26,7 @@ from sstw.s1_local_pair_dictionary import (  # noqa: E402
     PairDictionaryWanProcessor,
     dictionary_exit_code,
     install_pair_dictionary_processor,
+    load_dictionary_inputs,
     pair_indices,
     screen_pair_dictionary,
 )
@@ -72,6 +73,17 @@ def test_frozen_inputs_and_prior_failure_registration() -> None:
     assert _sha(ROOT / config["base_s1"]["config_path"]) == config["base_s1"]["config_raw_sha256"]
     assert _sha(ROOT / config["base_s1"]["plan_path"]) == config["base_s1"]["plan_raw_sha256"]
     assert _sha(ROOT / "SSTW_METHOD_AUTHORITY.md") == config["base_s1"]["authority_raw_sha256"]
+    authority = {
+        "commit": "b53ed1c23a91f0798e1955e55f53daea2298ed75",
+        "tree": "91bb9c99b1d4a49faf46a5eb92bd41573719e7f5",
+        "raw_sha256": "4013eb61c8b8d3165729e4f89ecc0936e05a734511227a44a818ea0ae850688f",
+    }
+    assert {
+        "commit": config["base_s1"]["authority_commit"],
+        "tree": config["base_s1"]["authority_tree"],
+        "raw_sha256": config["base_s1"]["authority_raw_sha256"],
+    } == authority
+    assert plan["method_authority"] == authority
     assert config["input_result"] == {
         "run_id": "0d3223669982a6c3",
         "archive_sha256": "07a4c137382ce67aaf16d1775ea244287568a7c2d7d3fedcc5fa104a75a31cdb",
@@ -91,6 +103,8 @@ def test_frozen_inputs_and_prior_failure_registration() -> None:
     for marker in ("1.20", "5.89", "0.0045", "0.032", "0.0666", "0.491", "0.024", "16", "120", "0.406", "0.413"):
         assert marker in text
     assert "S2 remains HOLD" in text
+    assert "S1_LOCAL_PAIR_DICTIONARY_EXACT10" in text
+    assert "multi-pair zero-sum, CFG-aware, single/three-Flow-step" in text
 
 
 def test_dictionary_geometry_coefficients_and_budget() -> None:
@@ -106,6 +120,19 @@ def test_dictionary_geometry_coefficients_and_budget() -> None:
                 assert 0 <= left < query < right < 8320
     assert config["call_budget"]["total_transformer_calls"] == 10
     assert config["call_budget"]["retry_count"] == 0
+
+
+def test_real_loader_accepts_new_authority_without_changing_base_science() -> None:
+    config, plan, base_config, base_plan = load_dictionary_inputs(ROOT)
+    assert config["base_s1"]["authority_commit"] == "b53ed1c23a91f0798e1955e55f53daea2298ed75"
+    assert plan["method_authority"]["tree"] == "91bb9c99b1d4a49faf46a5eb92bd41573719e7f5"
+    assert base_config["transformer_identity"]["block_index"] == 14
+    assert {name: base_config["flow_support"][name] for name in ("scheduler_index", "expected_timestep", "lambda")} == {
+        "scheduler_index": 4,
+        "expected_timestep": 749,
+        "lambda": 1.0,
+    }
+    assert base_plan["exact_transformer_calls"] == 20
 
 
 def test_unique_screen_is_deterministic_and_lexicographic() -> None:
@@ -272,5 +299,9 @@ def test_notebook_static_contract() -> None:
     assert "AUTHORIZED_REF = '0000000000000000000000000000000000000000'" in source
     assert "AUTHORIZE_EXECUTION = False" in source
     assert "AUTHORIZE_DRIVE_IO = False" in source
+    assert "AUTHORITY_COMMIT = 'b53ed1c23a91f0798e1955e55f53daea2298ed75'" in source
+    assert "AUTHORITY_TREE = '91bb9c99b1d4a49faf46a5eb92bd41573719e7f5'" in source
+    assert "AUTHORITY_RAW_SHA256 = '4013eb61c8b8d3165729e4f89ecc0936e05a734511227a44a818ea0ae850688f'" in source
+    assert "git', 'show', AUTHORITY_COMMIT + ':SSTW_METHOD_AUTHORITY.md'" in source
     for cell in code_cells:
         compile("".join(cell["source"]), "notebook-cell", "exec")

@@ -1,6 +1,11 @@
 {
   "schema": "sstw.s1.local_pair_dictionary.plan.v1",
   "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "method_authority": {
+    "commit": "b53ed1c23a91f0798e1955e55f53daea2298ed75",
+    "tree": "91bb9c99b1d4a49faf46a5eb92bd41573719e7f5",
+    "raw_sha256": "4013eb61c8b8d3165729e4f89ecc0936e05a734511227a44a818ea0ae850688f"
+  },
   "steps": [
     "load frozen S1 construction and exact Wan model",
     "run four prefix scheduler steps with cond and uncond",
