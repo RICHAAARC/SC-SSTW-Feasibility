@@ -1,0 +1,23 @@
+{
+  "schema": "sstw.s1.local_pair_dictionary.plan.v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "steps": [
+    "load frozen S1 construction and exact Wan model",
+    "run four prefix scheduler steps with cond and uncond",
+    "fork the step-4 latent without scheduler update",
+    "capture one OFF QK relation record for cond and uncond",
+    "screen sixteen single-pair radii analytically at lambda one",
+    "apply frozen per-axis eligibility and deterministic ranking",
+    "evaluate every eligible horizontal-vertical combination",
+    "publish one selected pair or PAIR_DICTIONARY_NO_GO"
+  ],
+  "condition_order": ["OFF_CAPTURE"],
+  "branch_order": ["cond","uncond"],
+  "axis_order": ["B1_horizontal","B2_vertical"],
+  "radius_order": [1,2,3,4,5,6,7,8],
+  "exact_transformer_calls": 10,
+  "retry_count": 0,
+  "no_scheduler_step_after_capture": true,
+  "no_block_or_velocity_injection": true,
+  "no_VAE_MP4_or_S2": true
+}

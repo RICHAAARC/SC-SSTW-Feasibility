@@ -1,0 +1,72 @@
+{
+  "schema": "sstw.s1.local_pair_dictionary.v1",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "base_s1": {
+    "config_path": "configs/s1_real_dit_relation_primitive.json",
+    "config_raw_sha256": "0dad730be27ef10df9db649e7a6bb57d329ed3be5c7f0aa18677389ad2b5d212",
+    "plan_path": "plans/s1_real_dit_relation_primitive.json",
+    "plan_raw_sha256": "1de73796528c574ba9e8502824cbbb9ee495cbcf1e8f35dcd78642a99dce96e7",
+    "authority_raw_sha256": "a34cad7f174ab8103ac7c54795393164f1ed74e559927da1198e18abb8836d18"
+  },
+  "input_result": {
+    "run_id": "0d3223669982a6c3",
+    "archive_sha256": "07a4c137382ce67aaf16d1775ea244287568a7c2d7d3fedcc5fa104a75a31cdb",
+    "source_commit": "e8923e5de8b752ed3211af98c4120340acdea100",
+    "status": "S1_NO_GO_THIS_CONSTRUCTION",
+    "structural_passed": true
+  },
+  "frozen_construction": {
+    "block_index": 14,
+    "scheduler_index": 4,
+    "expected_timestep": 749,
+    "lambda": 1.0,
+    "query_indices": [336,976,1616,2256,2896,3536,4176,4816,5456,6096,6736,7376,8016],
+    "token_grid": [13,20,32],
+    "coefficient_pair": [0.7071067811865475,-0.7071067811865475],
+    "axes": {
+      "B1_horizontal": {"radii": [1,2,3,4,5,6,7,8], "pair_formula": ["q-r","q+r"]},
+      "B2_vertical": {"radii": [1,2,3,4,5,6,7,8], "pair_formula": ["q-32r","q+32r"]}
+    },
+    "branches": ["cond","uncond"]
+  },
+  "candidate_thresholds": {
+    "odd_to_noise_or_ulp_minimum": 8.0,
+    "even_to_odd_strict_maximum": 0.25,
+    "temporal_total_variation_strict_maximum": 0.10,
+    "axis_absolute_cosine_strict_maximum": 0.5,
+    "axis_gain_ratio_inclusive": [0.25,4.0],
+    "relation_jacobian_cross_ratio_inclusive_maximum": 0.25,
+    "relation_jacobian_diagonal_sign": "positive"
+  },
+  "axis_ranking": [
+    "worst_branch_odd_to_noise_or_ulp_desc",
+    "worst_branch_even_to_odd_asc",
+    "worst_branch_temporal_total_variation_asc",
+    "radius_asc"
+  ],
+  "combination_ranking": [
+    "worst_axis_and_branch_odd_to_noise_or_ulp_desc",
+    "worst_axis_and_branch_even_to_odd_asc",
+    "worst_axis_and_branch_temporal_total_variation_asc",
+    "horizontal_radius_asc",
+    "vertical_radius_asc"
+  ],
+  "call_budget": {
+    "prefix_scheduler_indices": [0,1,2,3],
+    "prefix_branches": ["cond","uncond"],
+    "prefix_transformer_calls": 8,
+    "capture_scheduler_index": 4,
+    "capture_branches": ["cond","uncond"],
+    "capture_transformer_calls": 2,
+    "total_transformer_calls": 10,
+    "scheduler_steps_executed": 4,
+    "retry_count": 0
+  },
+  "statuses": ["PAIR_DICTIONARY_READY","PAIR_DICTIONARY_NO_GO","INSTRUMENTATION_INSUFFICIENT"],
+  "forbidden": [
+    "lambda_scan","flow_scan","multi_pair_stencil","block_injection","velocity_conclusion",
+    "latent_carrier","output_residual","pixel_carrier","VAE","MP4","S2"
+  ],
+  "formal_result": false,
+  "stage_progression_allowed": false
+}
