@@ -218,6 +218,29 @@ def capture_block_output(block_output: Any, torch: Any) -> tuple[Any, float, Any
     return target_rows, global_rms, full
 
 
+def transformer_forward_inference(
+    torch: Any,
+    transformer: Any,
+    *,
+    branch: str,
+    hidden_states: Any,
+    timestep: Any,
+    encoder_hidden_states: Any,
+) -> Any:
+    """Run one real transformer call without constructing an autograd graph."""
+
+    with torch.inference_mode():
+        with transformer.cache_context(branch):
+            velocity = transformer(
+                hidden_states=hidden_states,
+                timestep=timestep,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_kwargs=None,
+                return_dict=False,
+            )[0]
+        return velocity.detach()
+
+
 def runtime_capability_diagnostics(
     torch: Any,
     *,
@@ -344,19 +367,20 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
 
         hook = target_block.register_forward_hook(block_hook)
         device = pipe._execution_device
-        prompt_embeds, negative_embeds = pipe.encode_prompt(
-            prompt=config["generation"]["prompt"], negative_prompt=config["generation"]["negative_prompt"],
-            do_classifier_free_guidance=True, num_videos_per_prompt=1, device=device,
-        )
-        prompt_embeds = prompt_embeds.to(transformer.dtype)
-        negative_embeds = negative_embeds.to(transformer.dtype)
-        pipe.scheduler.set_timesteps(config["generation"]["inference_steps"], device=device)
-        timesteps = pipe.scheduler.timesteps
-        actual_timesteps = [int(value.item()) for value in timesteps]
-        if len(actual_timesteps) != 8 or actual_timesteps[4] != config["flow_support"]["expected_timestep"]:
-            raise S1InstrumentationError(f"scheduler identity mismatch: {actual_timesteps}")
-        generator = torch.Generator(device="cuda").manual_seed(config["generation"]["seed"])
-        latents = pipe.prepare_latents(1, transformer.config.in_channels, 320, 512, 49, torch.float32, device, generator, None)
+        with torch.inference_mode():
+            prompt_embeds, negative_embeds = pipe.encode_prompt(
+                prompt=config["generation"]["prompt"], negative_prompt=config["generation"]["negative_prompt"],
+                do_classifier_free_guidance=True, num_videos_per_prompt=1, device=device,
+            )
+            prompt_embeds = prompt_embeds.to(transformer.dtype).detach()
+            negative_embeds = negative_embeds.to(transformer.dtype).detach()
+            pipe.scheduler.set_timesteps(config["generation"]["inference_steps"], device=device)
+            timesteps = pipe.scheduler.timesteps
+            actual_timesteps = [int(value.item()) for value in timesteps]
+            if len(actual_timesteps) != 8 or actual_timesteps[4] != config["flow_support"]["expected_timestep"]:
+                raise S1InstrumentationError(f"scheduler identity mismatch: {actual_timesteps}")
+            generator = torch.Generator(device="cuda").manual_seed(config["generation"]["seed"])
+            latents = pipe.prepare_latents(1, transformer.config.in_channels, 320, 512, 49, torch.float32, device, generator, None).detach()
 
         def one_call(latent_input: Any, timestep: Any, scheduler_index: int, condition: str, branch: str, state: tuple[float, float], keep: bool) -> tuple[Any, dict[str, Any]]:
             call_index = len(call_records) + 1
@@ -364,11 +388,24 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
             before_relation = len(processor.records)
             before_block = len(captured_blocks)
             embeddings = prompt_embeds if branch == "cond" else negative_embeds
-            with transformer.cache_context(branch):
-                velocity = transformer(hidden_states=latent_input.clone().to(transformer.dtype), timestep=timestep.expand(1), encoder_hidden_states=embeddings, attention_kwargs=None, return_dict=False)[0]
+            with torch.inference_mode():
+                hidden_states = latent_input.clone().to(transformer.dtype)
+                expanded_timestep = timestep.expand(1)
+            velocity = transformer_forward_inference(
+                torch,
+                transformer,
+                branch=branch,
+                hidden_states=hidden_states,
+                timestep=expanded_timestep,
+                encoder_hidden_states=embeddings,
+            )
+            if getattr(velocity, "grad_fn", None) is not None or bool(getattr(velocity, "requires_grad", False)):
+                raise S1InstrumentationError("S1 transformer output retained an autograd graph")
             if len(processor.records) != before_relation + 1 or len(captured_blocks) != before_block + 1:
                 raise S1InstrumentationError("processor/block instrumentation call count mismatch")
             relation_record = processor.records[-1]
+            if relation_record.get("grad_enabled") is not False or relation_record.get("inference_mode_enabled") is not True:
+                raise S1InstrumentationError("S1 transformer call escaped inference mode")
             block_slice, block_global_rms, block_full = captured_blocks.pop()
             velocity_slice = _extract_velocity_slice(velocity)
             call_identity = {"call_index": call_index, "scheduler_index": scheduler_index, "timestep": int(timestep.item()),
@@ -385,10 +422,13 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
             timestep = timesteps[scheduler_index]
             cond_velocity, _ = one_call(latents, timestep, scheduler_index, f"PREFIX_{scheduler_index}", "cond", (0.0, 0.0), False)
             uncond_velocity, _ = one_call(latents, timestep, scheduler_index, f"PREFIX_{scheduler_index}", "uncond", (0.0, 0.0), False)
-            guided = uncond_velocity + config["generation"]["guidance_scale"] * (cond_velocity - uncond_velocity)
-            latents = pipe.scheduler.step(guided, timestep, latents, return_dict=False)[0]
+            with torch.inference_mode():
+                guided = uncond_velocity + config["generation"]["guidance_scale"] * (cond_velocity - uncond_velocity)
+                latents = pipe.scheduler.step(guided, timestep, latents, return_dict=False)[0].detach()
+            del cond_velocity, uncond_velocity, guided
 
-        probe_latent = latents.detach().clone()
+        with torch.inference_mode():
+            probe_latent = latents.detach().clone()
         probe_latent_sha256 = sha256_tensor(probe_latent)
         timestep = timesteps[4]
         for condition in CONDITION_ORDER:
@@ -396,6 +436,7 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
             for branch in BRANCH_ORDER:
                 _velocity, captured = one_call(probe_latent, timestep, 4, condition, branch, CONDITION_STATES[condition], True)
                 probe[condition][branch] = captured
+                del _velocity
             if condition == "OFF_R1":
                 equivalence_records = [probe[condition][branch]["processor"] for branch in BRANCH_ORDER]
                 if not all(
@@ -449,6 +490,8 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
         structural = {
             "all_processor_records_finite": all(np.isfinite(np.asarray(record["relation"], dtype=np.float64)).all() for record in processor.records),
             "all_pair_sums_zero": all(record["pair_sums_zero"] for record in processor.records),
+            "all_grad_disabled": all(record["grad_enabled"] is False for record in processor.records),
+            "all_inference_mode_enabled": all(record["inference_mode_enabled"] is True for record in processor.records),
             "all_non_target_rows_unreplaced": all(record["non_target_rows_replaced"] == 0 for record in processor.records),
             "dense_bias_never_materialized": all(record["dense_bias_materialized"] is False for record in processor.records),
             "probe_bias_counts": [probe[condition][branch]["processor"]["changed_logit_count"] for condition in CONDITION_ORDER for branch in BRANCH_ORDER],
@@ -457,6 +500,7 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
         }
         structural["passed"] = (
             structural["all_processor_records_finite"] and structural["all_pair_sums_zero"]
+            and structural["all_grad_disabled"] and structural["all_inference_mode_enabled"]
             and structural["all_non_target_rows_unreplaced"] and structural["dense_bias_never_materialized"]
             and structural["probe_bias_counts"] == [0, 0, 0, 0, 26, 26, 26, 26, 26, 26, 26, 26]
         )

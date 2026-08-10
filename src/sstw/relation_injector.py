@@ -163,6 +163,8 @@ class S1WanRelationProcessor:
         if getattr(attn, "fused_projections", False):
             raise RuntimeError("fused Wan projections are outside the frozen S1 path")
         torch = self.torch
+        grad_enabled = bool(torch.is_grad_enabled())
+        inference_mode_enabled = bool(torch.is_inference_mode_enabled())
         try:
             from diffusers.models.attention_dispatch import dispatch_attention_fn
         except Exception as exc:  # pragma: no cover - production dependency boundary
@@ -227,6 +229,8 @@ class S1WanRelationProcessor:
             "lambda_zero_reference_relative_rms": relative_rms,
             "lambda_zero_reference_max_bfloat16_ulp": max_ulp,
             "non_target_rows_replaced": 0,
+            "grad_enabled": grad_enabled,
+            "inference_mode_enabled": inference_mode_enabled,
         })
         self.records.append(record)
         self.context = None

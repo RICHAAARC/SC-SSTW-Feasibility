@@ -29,6 +29,7 @@ from sstw.s1_real_dit_relation_primitive import (
     load_frozen_inputs,
     runtime_capability_diagnostics,
     S1InstrumentationError,
+    transformer_forward_inference,
     validate_method_runtime_interface,
 )
 
@@ -95,6 +96,82 @@ def test_block_capture_indexes_on_target_device_then_moves_slice_to_cpu() -> Non
     assert np.array_equal(target_rows.value, values[:, TARGET_QUERY_INDICES, :])
     assert np.array_equal(full.value, values)
     assert global_rms == pytest.approx(float(np.sqrt(np.mean(np.square(values)))))
+
+
+class _FakeInferenceContext:
+    def __init__(self, torch: "_FakeInferenceTorch") -> None:
+        self.torch = torch
+
+    def __enter__(self) -> None:
+        self.previous = (self.torch.grad_enabled, self.torch.inference_enabled)
+        self.torch.grad_enabled = False
+        self.torch.inference_enabled = True
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.torch.grad_enabled, self.torch.inference_enabled = self.previous
+
+
+class _FakeInferenceTorch:
+    def __init__(self) -> None:
+        self.grad_enabled = True
+        self.inference_enabled = False
+
+    def inference_mode(self) -> _FakeInferenceContext:
+        return _FakeInferenceContext(self)
+
+    def is_grad_enabled(self) -> bool:
+        return self.grad_enabled
+
+    def is_inference_mode_enabled(self) -> bool:
+        return self.inference_enabled
+
+
+class _FakeCacheContext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        return None
+
+
+class _FakeVelocity:
+    def __init__(self, grad_fn: object | None) -> None:
+        self.grad_fn = grad_fn
+
+    def detach(self) -> "_FakeVelocity":
+        return _FakeVelocity(None)
+
+
+class _FakeInferenceTransformer:
+    def __init__(self, torch: _FakeInferenceTorch) -> None:
+        self.torch = torch
+        self.processor_flags: list[tuple[bool, bool]] = []
+
+    def cache_context(self, branch: str) -> _FakeCacheContext:
+        assert branch in {"cond", "uncond"}
+        return _FakeCacheContext()
+
+    def __call__(self, **kwargs: object) -> tuple[_FakeVelocity]:
+        assert kwargs["return_dict"] is False and kwargs["attention_kwargs"] is None
+        self.processor_flags.append((self.torch.is_grad_enabled(), self.torch.is_inference_mode_enabled()))
+        grad_fn = object() if self.torch.is_grad_enabled() else None
+        return (_FakeVelocity(grad_fn),)
+
+
+def test_transformer_fake_processor_path_runs_in_inference_mode_without_grad_fn() -> None:
+    torch = _FakeInferenceTorch()
+    transformer = _FakeInferenceTransformer(torch)
+    output = transformer_forward_inference(
+        torch,
+        transformer,
+        branch="cond",
+        hidden_states=object(),
+        timestep=object(),
+        encoder_hidden_states=object(),
+    )
+    assert transformer.processor_flags == [(False, True)]
+    assert output.grad_fn is None
+    assert torch.is_grad_enabled() is True and torch.is_inference_mode_enabled() is False
 
 
 def test_authority_config_conditions_and_exact20_are_frozen() -> None:
@@ -359,7 +436,7 @@ def test_fake_wan_adapter_installs_only_block14_processor() -> None:
 
 def test_real_processor_source_has_qkv_norm_rope_sparse_rows_and_no_proxy() -> None:
     source = inspect.getsource(S1WanRelationProcessor)
-    for token in ("attn.to_q", "attn.to_k", "attn.to_v", "attn.norm_q", "attn.norm_k", "_apply_rotary", "dispatch_attention_fn", "torch.softmax", "TARGET_QUERY_INDICES"):
+    for token in ("attn.to_q", "attn.to_k", "attn.to_v", "attn.norm_q", "attn.norm_k", "_apply_rotary", "dispatch_attention_fn", "torch.softmax", "TARGET_QUERY_INDICES", "torch.is_grad_enabled()", "torch.is_inference_mode_enabled()"):
         assert token in source
     assert "8320, 8320" not in source and "register_forward_hook" not in source
     forbidden = ("output_residual", "latent_carrier", "vae.decode", "pixel_carrier")
@@ -372,4 +449,8 @@ def test_runner_source_freezes_prefix_fork_and_no_VAE_or_MP4_execution() -> None
     assert "probe_latent = latents.detach().clone()" in source
     assert "for condition in CONDITION_ORDER" in source
     assert source.count("pipe.scheduler.step(") == 1
+    assert "with torch.inference_mode():" in source
+    assert "S1 transformer call escaped inference mode" in source
+    assert "S1 transformer output retained an autograd graph" in source
+    assert "pipe.scheduler.step(guided, timestep, latents, return_dict=False)[0].detach()" in source
     assert ".vae.decode(" not in source and "encode_saved_mp4" not in source
