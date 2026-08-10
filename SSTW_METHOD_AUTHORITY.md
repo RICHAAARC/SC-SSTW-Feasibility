@@ -69,6 +69,20 @@ PAIR_DICTIONARY_NO_GO
 
 该结果排除的是 `block14 + lambda1 + Flow step4` 下的有限 radius1--8 单-pair字典。它进一步表明当前主要矛盾是时序稳定性，而不是单纯换一个更远的 Patch pair 即可解决。下一步不得扩大 radius 或重复单-pair扫描。
 
+### propagation screen 首次执行的工程状态
+
+运行 `7f9f1484e9c30627` 在进入 Stage2 three-step changed-latent 路径时触发 `UniPCMultistepScheduler.this_order` 断言。根因是多个 condition 复用了同一个已经推进过内部历史的 scheduler，而不是每个 condition 从同一 step3/step4 scheduler state 独立分叉。
+
+该运行没有生成 `audit.json`，不得解释为 `PROPAGATION_CONSTRUCTION_READY` 或 `PROPAGATION_CONSTRUCTION_NO_GO`，也不得改变任何方法判据。状态固定为：
+
+```text
+PROPAGATION_SCREEN_EXECUTION = ENGINEERING_SCHEDULER_FORK_INVALID
+SCIENTIFIC_RESULT = NONE
+NEXT_ACTION = FIX_SCHEDULER_STATE_FORK_AND_RERUN_SAME_FROZEN_SCREEN
+```
+
+修复只允许保存前缀对应的 scheduler state，并为每个 OFF/axis/sign/branch condition 独立恢复；候选、basis、CFG公式、Flow support、阈值、调用预算和排序必须零变化。
+
 ### lambda-only 结论
 
 不得把下一步设为单纯提高 `lambda`。在 `lambda=1` 附近的局部线性外推中：
@@ -938,4 +952,5 @@ FIRST_FAILED_STAGE = S1_REAL_DIT_RELATION_PRIMITIVE
 CURRENT_S1_RESULT = S1_NO_GO_THIS_CONSTRUCTION
 CURRENT_CONSTRUCTION_SCREEN_RESULT = PAIR_DICTIONARY_NO_GO
 NEXT_DIAGNOSTIC = S1_PROPAGATION_SENSITIVITY_SCREEN
+LAST_EXECUTION = ENGINEERING_SCHEDULER_FORK_INVALID
 ```
