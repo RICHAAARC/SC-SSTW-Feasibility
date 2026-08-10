@@ -22,6 +22,7 @@ from sstw.relation_injector import (
 )
 from sstw.s1_real_dit_relation_primitive import (
     BRANCH_ORDER,
+    capture_block_output,
     CONDITION_ORDER,
     LAYER_ORDER,
     evaluate_preregistered_statistics,
@@ -33,6 +34,67 @@ from sstw.s1_real_dit_relation_primitive import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _FakeIndex:
+    def __init__(self, values: tuple[int, ...], device: str) -> None:
+        self.values = np.asarray(values, dtype=np.int64)
+        self.device = device
+
+
+class _FakeDeviceTensor:
+    def __init__(self, value: np.ndarray, device: str, index_log: list[tuple[str, str]]) -> None:
+        self.value = np.asarray(value, dtype=np.float64)
+        self.device = device
+        self.index_log = index_log
+
+    def index_select(self, dimension: int, index: _FakeIndex) -> "_FakeDeviceTensor":
+        self.index_log.append((self.device, index.device))
+        if self.device != index.device:
+            raise RuntimeError("device mismatch")
+        return _FakeDeviceTensor(np.take(self.value, index.values, axis=dimension), self.device, self.index_log)
+
+    def detach(self) -> "_FakeDeviceTensor":
+        return self
+
+    def float(self) -> "_FakeDeviceTensor":
+        return self
+
+    def cpu(self) -> "_FakeDeviceTensor":
+        return _FakeDeviceTensor(self.value.copy(), "cpu", self.index_log)
+
+    def square(self) -> "_FakeDeviceTensor":
+        return _FakeDeviceTensor(np.square(self.value), self.device, self.index_log)
+
+    def mean(self) -> "_FakeDeviceTensor":
+        return _FakeDeviceTensor(np.asarray(self.value.mean()), self.device, self.index_log)
+
+    def sqrt(self) -> "_FakeDeviceTensor":
+        return _FakeDeviceTensor(np.sqrt(self.value), self.device, self.index_log)
+
+    def item(self) -> float:
+        return float(self.value.item())
+
+
+class _FakeCaptureTorch:
+    long = "long"
+
+    @staticmethod
+    def tensor(values: tuple[int, ...], *, device: str, dtype: str) -> _FakeIndex:
+        assert dtype == "long"
+        return _FakeIndex(values, device)
+
+
+def test_block_capture_indexes_on_target_device_then_moves_slice_to_cpu() -> None:
+    values = np.arange(1 * 8320 * 3, dtype=np.float64).reshape(1, 8320, 3) / 100.0
+    index_log: list[tuple[str, str]] = []
+    block_output = _FakeDeviceTensor(values, "cuda:7", index_log)
+    target_rows, global_rms, full = capture_block_output(block_output, _FakeCaptureTorch())
+    assert index_log == [("cuda:7", "cuda:7")]
+    assert target_rows.device == "cpu" and full.device == "cpu"
+    assert np.array_equal(target_rows.value, values[:, TARGET_QUERY_INDICES, :])
+    assert np.array_equal(full.value, values)
+    assert global_rms == pytest.approx(float(np.sqrt(np.mean(np.square(values)))))
 
 
 def test_authority_config_conditions_and_exact20_are_frozen() -> None:

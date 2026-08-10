@@ -208,6 +208,16 @@ def _extract_velocity_slice(value: Any) -> Any:
     return torch.stack(slices, dim=0).detach().float().cpu()
 
 
+def capture_block_output(block_output: Any, torch: Any) -> tuple[Any, float, Any]:
+    """Capture target rows on-device and preserve the full-block RMS definition."""
+
+    indices = torch.tensor(TARGET_QUERY_INDICES, device=block_output.device, dtype=torch.long)
+    target_rows = block_output.index_select(1, indices).detach().float().cpu()
+    full = block_output.detach().float().cpu()
+    global_rms = float(full.square().mean().sqrt().item())
+    return target_rows, global_rms, full
+
+
 def runtime_capability_diagnostics(
     torch: Any,
     *,
@@ -330,9 +340,7 @@ def run_s1_once(*, repo_root: Path, output: Path, argv: Sequence[str], cwd: Path
         captured_blocks: list[tuple[Any, float, Any]] = []
 
         def block_hook(_module: Any, _inputs: Any, block_output: Any) -> None:
-            indices = torch.tensor(TARGET_QUERY_INDICES, device=block_output.device, dtype=torch.long)
-            full = block_output.detach().float().cpu()
-            captured_blocks.append((full.index_select(1, indices), float(full.square().mean().sqrt().item()), full))
+            captured_blocks.append(capture_block_output(block_output, torch))
 
         hook = target_block.register_forward_hook(block_hook)
         device = pipe._execution_device
