@@ -211,8 +211,16 @@ def _extract_velocity_slice(value: Any) -> Any:
 def capture_block_output(block_output: Any, torch: Any) -> tuple[Any, float, Any]:
     """Capture target rows on-device and preserve the full-block RMS definition."""
 
+    if tuple(block_output.shape) != (1, 8320, 1536):
+        raise S1InstrumentationError("block output must be exact [1,8320,1536]")
     indices = torch.tensor(TARGET_QUERY_INDICES, device=block_output.device, dtype=torch.long)
-    target_rows = block_output.index_select(1, indices).detach().float().cpu()
+    selected = block_output.index_select(1, indices)
+    if tuple(selected.shape) != (1, 13, 1536):
+        raise S1InstrumentationError("selected block probe must be exact [1,13,1536]")
+    target_rows = selected.squeeze(0)
+    if tuple(target_rows.shape) != (13, 1536):
+        raise S1InstrumentationError("normalized block probe must be exact [13,1536]")
+    target_rows = target_rows.detach().float().cpu()
     full = block_output.detach().float().cpu()
     global_rms = float(full.square().mean().sqrt().item())
     return target_rows, global_rms, full

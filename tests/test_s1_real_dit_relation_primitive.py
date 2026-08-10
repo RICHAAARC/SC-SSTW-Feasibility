@@ -25,6 +25,7 @@ from sstw.relation_injector import (
 )
 from sstw.s1_real_dit_relation_primitive import (
     BRANCH_ORDER,
+    canonical_json_bytes,
     capture_block_output,
     CONDITION_ORDER,
     LAYER_ORDER,
@@ -47,16 +48,47 @@ class _FakeIndex:
 
 
 class _FakeDeviceTensor:
-    def __init__(self, value: np.ndarray, device: str, index_log: list[tuple[str, str]]) -> None:
-        self.value = np.asarray(value, dtype=np.float64)
+    def __init__(
+        self,
+        value: np.ndarray | None,
+        device: str,
+        index_log: list[tuple[str, str]],
+        *,
+        declared_shape: tuple[int, ...] | None = None,
+        selected_value: np.ndarray | None = None,
+        squeezed_value: np.ndarray | None = None,
+        global_rms: float | None = None,
+    ) -> None:
+        self.value = None if value is None else np.asarray(value, dtype=np.float64)
         self.device = device
         self.index_log = index_log
+        self._shape = tuple(declared_shape if declared_shape is not None else self.value.shape)
+        self.selected_value = selected_value
+        self.squeezed_value = squeezed_value
+        self.global_rms = global_rms
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._shape
 
     def index_select(self, dimension: int, index: _FakeIndex) -> "_FakeDeviceTensor":
         self.index_log.append((self.device, index.device))
         if self.device != index.device:
             raise RuntimeError("device mismatch")
+        if self.selected_value is not None:
+            return _FakeDeviceTensor(
+                self.selected_value,
+                self.device,
+                self.index_log,
+                squeezed_value=self.squeezed_value,
+            )
+        assert self.value is not None
         return _FakeDeviceTensor(np.take(self.value, index.values, axis=dimension), self.device, self.index_log)
+
+    def squeeze(self, dimension: int) -> "_FakeDeviceTensor":
+        assert self.value is not None
+        value = self.squeezed_value if self.squeezed_value is not None else np.squeeze(self.value, axis=dimension)
+        return _FakeDeviceTensor(value, self.device, self.index_log)
 
     def detach(self) -> "_FakeDeviceTensor":
         return self
@@ -65,19 +97,36 @@ class _FakeDeviceTensor:
         return self
 
     def cpu(self) -> "_FakeDeviceTensor":
-        return _FakeDeviceTensor(self.value.copy(), "cpu", self.index_log)
+        copied = None if self.value is None else self.value.copy()
+        return _FakeDeviceTensor(
+            copied,
+            "cpu",
+            self.index_log,
+            declared_shape=self.shape,
+            selected_value=self.selected_value,
+            squeezed_value=self.squeezed_value,
+            global_rms=self.global_rms,
+        )
 
-    def square(self) -> "_FakeDeviceTensor":
-        return _FakeDeviceTensor(np.square(self.value), self.device, self.index_log)
+    def square(self) -> "_FakeScalar":
+        if self.value is None:
+            assert self.global_rms is not None
+            return _FakeScalar(self.global_rms**2)
+        return _FakeScalar(float(np.mean(np.square(self.value))))
 
-    def mean(self) -> "_FakeDeviceTensor":
-        return _FakeDeviceTensor(np.asarray(self.value.mean()), self.device, self.index_log)
 
-    def sqrt(self) -> "_FakeDeviceTensor":
-        return _FakeDeviceTensor(np.sqrt(self.value), self.device, self.index_log)
+class _FakeScalar:
+    def __init__(self, value: float) -> None:
+        self.value = float(value)
+
+    def mean(self) -> "_FakeScalar":
+        return self
+
+    def sqrt(self) -> "_FakeScalar":
+        return _FakeScalar(math.sqrt(self.value))
 
     def item(self) -> float:
-        return float(self.value.item())
+        return self.value
 
 
 class _FakeCaptureTorch:
@@ -90,15 +139,60 @@ class _FakeCaptureTorch:
 
 
 def test_block_capture_indexes_on_target_device_then_moves_slice_to_cpu() -> None:
-    values = np.arange(1 * 8320 * 3, dtype=np.float64).reshape(1, 8320, 3) / 100.0
+    selected_values = np.arange(1 * 13 * 1536, dtype=np.float64).reshape(1, 13, 1536) / 100.0
     index_log: list[tuple[str, str]] = []
-    block_output = _FakeDeviceTensor(values, "cuda:7", index_log)
+    block_output = _FakeDeviceTensor(
+        None,
+        "cuda:7",
+        index_log,
+        declared_shape=(1, 8320, 1536),
+        selected_value=selected_values,
+        global_rms=2.75,
+    )
     target_rows, global_rms, full = capture_block_output(block_output, _FakeCaptureTorch())
     assert index_log == [("cuda:7", "cuda:7")]
     assert target_rows.device == "cpu" and full.device == "cpu"
-    assert np.array_equal(target_rows.value, values[:, TARGET_QUERY_INDICES, :])
-    assert np.array_equal(full.value, values)
-    assert global_rms == pytest.approx(float(np.sqrt(np.mean(np.square(values)))))
+    assert target_rows.shape == (13, 1536)
+    assert np.array_equal(target_rows.value, selected_values[0])
+    assert full.shape == (1, 8320, 1536) and full.value is None
+    assert global_rms == pytest.approx(2.75)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ((8320, 1536), (2, 8320, 1536), (1, 8319, 1536), (1, 8320, 1535)),
+)
+def test_block_capture_rejects_wrong_ndim_batch_token_or_channel(shape: tuple[int, ...]) -> None:
+    block_output = _FakeDeviceTensor(None, "cuda:0", [], declared_shape=shape, global_rms=1.0)
+    with pytest.raises(S1InstrumentationError, match=r"exact \[1,8320,1536\]"):
+        capture_block_output(block_output, _FakeCaptureTorch())
+
+
+def test_block_capture_rejects_wrong_selected_shape() -> None:
+    block_output = _FakeDeviceTensor(
+        None,
+        "cuda:0",
+        [],
+        declared_shape=(1, 8320, 1536),
+        selected_value=np.zeros((1, 12, 1536)),
+        global_rms=1.0,
+    )
+    with pytest.raises(S1InstrumentationError, match=r"exact \[1,13,1536\]"):
+        capture_block_output(block_output, _FakeCaptureTorch())
+
+
+def test_block_capture_rejects_wrong_normalized_shape() -> None:
+    block_output = _FakeDeviceTensor(
+        None,
+        "cuda:0",
+        [],
+        declared_shape=(1, 8320, 1536),
+        selected_value=np.zeros((1, 13, 1536)),
+        squeezed_value=np.zeros((12, 1536)),
+        global_rms=1.0,
+    )
+    with pytest.raises(S1InstrumentationError, match=r"exact \[13,1536\]"):
+        capture_block_output(block_output, _FakeCaptureTorch())
 
 
 class _FakeInferenceContext:
@@ -469,6 +563,31 @@ def test_preregistered_O_E_N_gate_is_per_layer_branch_axis() -> None:
     assert result["all_cells_pass"] is True
     assert set(result["cells"]) == {f"{layer}:{branch}" for branch in (*BRANCH_ORDER, "guidance") for layer in LAYER_ORDER}
     assert all(cell["axis_absolute_cosine"] < 0.5 and cell["passed"] for cell in result["cells"].values())
+
+
+def test_normalized_block_temporal_diff_is_nonempty_finite_and_canonical_json_safe() -> None:
+    config, _ = load_frozen_inputs(ROOT)
+    overrides = {
+        (branch, layer, axis): 0.005
+        for branch in (*BRANCH_ORDER, "guidance")
+        for layer in ("block", "velocity")
+        for axis in ("B1", "B2")
+    }
+    probe = _synthetic_probe()
+    for condition in CONDITION_ORDER:
+        for branch in BRANCH_ORDER:
+            probe[condition][branch]["relation"] = (
+                np.asarray(probe[condition][branch]["relation"], dtype=np.float64) + 0.2
+            ).tolist()
+    result = evaluate_preregistered_statistics(probe, config["thresholds"], overrides)
+    block_cells = [cell for name, cell in result["cells"].items() if name.startswith("block:")]
+    assert block_cells
+    for cell in block_cells:
+        for axis in ("B1", "B2"):
+            temporal_tv = cell["axes"][axis]["temporal_total_variation"]
+            assert math.isfinite(temporal_tv)
+    encoded = canonical_json_bytes({"evaluation": result})
+    assert b"NaN" not in encoded and b"Infinity" not in encoded
 
 
 def test_fake_wan_adapter_installs_only_block14_processor() -> None:
