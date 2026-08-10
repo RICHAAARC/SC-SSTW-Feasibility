@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "protocol_id": "sstw_v2_g0_flow_guidance_primitive",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "model": {
+    "repository": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"
+  },
+  "generation": {
+    "prompt": "locked camera, dark matte background, a single bright white cube moving slowly across the center, simple studio lighting, no text, no cuts",
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple subjects, flicker",
+    "seed": 1275,
+    "guidance_scale": 5.0,
+    "inference_steps": 8,
+    "frames": 49,
+    "height": 320,
+    "width": 512
+  },
+  "observer": {
+    "version": "opponent_chroma_cosine_v2_0",
+    "frame_indices": [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48],
+    "coordinate_1": "mean((R-G)*horizontal_unit_rms_one_cycle_cosine)",
+    "coordinate_2": "mean((B-(R+G)/2)*vertical_unit_rms_one_cycle_cosine)"
+  },
+  "guidance": {
+    "active_after_scheduler_index": 5,
+    "normal_steps_remaining": [6, 7],
+    "relative_update_rms": 0.005,
+    "conditions": ["OFF_R1", "OFF_R2", "PLUS_G1", "MINUS_G1", "PLUS_G2", "MINUS_G2"]
+  },
+  "criteria": {
+    "maximum_absolute_gradient_cosine": 0.5,
+    "maximum_cross_to_own_ratio": 0.5,
+    "maximum_even_to_odd_ratio": 0.5,
+    "maximum_final_rgb_relative_rms": 0.02
+  },
+  "allowed_statuses": [
+    "FLOW_GUIDANCE_PRIMITIVE_FEASIBLE",
+    "FLOW_GUIDANCE_PRIMITIVE_NOT_FEASIBLE",
+    "INSTRUMENTATION_INSUFFICIENT"
+  ]
+}
