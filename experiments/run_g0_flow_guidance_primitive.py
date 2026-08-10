@@ -19,6 +19,17 @@ from sstw.flow_guidance_embedder import (  # noqa: E402
 )
 
 
+def exception_chain(exc: BaseException) -> list[dict[str, str]]:
+    chain: list[dict[str, str]] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append({"type": type(current).__name__, "message": str(current)})
+        current = current.__cause__ or current.__context__
+    return chain
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
@@ -31,6 +42,7 @@ def main() -> int:
             "diagnostic_class": "DIAGNOSTIC_ONLY",
             "reason": type(exc).__name__,
             "message": str(exc),
+            "exception_chain": exception_chain(exc),
             "formal_result": False,
             "stage_progression_allowed": False,
         }

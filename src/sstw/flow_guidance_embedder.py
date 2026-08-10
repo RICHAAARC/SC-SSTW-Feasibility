@@ -725,7 +725,9 @@ def run_g0_once(
     transformer_calls = 0
     vae_decodes = 0
     final_latents: dict[str, Any] = {}
+    stage = "runtime_ready"
     try:
+        stage = "encode_prompt_and_prepare_latent"
         with torch.inference_mode():
             prompt_embeddings, negative_embeddings = pipe.encode_prompt(
                 prompt=generation["prompt"],
@@ -756,6 +758,7 @@ def run_g0_once(
                 None,
             ).detach()
             for index in range(int(config["guidance"]["active_after_scheduler_index"]) + 1):
+                stage = f"prefix_transformer_step_{index}"
                 conditional = _transformer_velocity(
                     pipe, latent, timesteps[index], prompt_embeddings, "cond", torch
                 )
@@ -771,9 +774,11 @@ def run_g0_once(
                 )[0].detach()
                 del conditional, unconditional, guided
         boundary_latent = latent.detach().clone()
+        stage = "capture_unipc_after_step_5"
         scheduler_snapshot, scheduler_summary = capture_unipc_snapshot(
             pipe.scheduler, torch, expected_step_index=6
         )
+        stage = "differentiable_vae_observer_gradient"
         gradients, gradient_diagnostics = common_axis_gradients_torch(
             boundary_latent, pipe.vae, torch
         )
@@ -786,6 +791,7 @@ def run_g0_once(
         )
         del gradients
         for condition in G0_CONDITION_ORDER:
+            stage = f"continue_condition_{condition}"
             final_latents[condition], calls = _continue_condition(
                 pipe,
                 condition_latents[condition],
@@ -801,14 +807,17 @@ def run_g0_once(
         observations: dict[str, Any] = {}
         rgb_relative: dict[str, dict[str, float]] = {}
         with torch.inference_mode():
+            stage = "decode_final_OFF_R1"
             off_rgb_1 = decode_wan_latents_torch(final_latents["OFF_R1"], pipe.vae, torch)
             vae_decodes += 1
             observations["OFF_R1"] = fixed_observer_torch(off_rgb_1, torch)[0].detach().float().cpu().tolist()
+            stage = "decode_final_OFF_R2"
             off_rgb_2 = decode_wan_latents_torch(final_latents["OFF_R2"], pipe.vae, torch)
             vae_decodes += 1
             observations["OFF_R2"] = fixed_observer_torch(off_rgb_2, torch)[0].detach().float().cpu().tolist()
             off_rgb_floor = _relative_rgb_rms(off_rgb_2, off_rgb_1, torch)
             for condition in G0_ACTIVE_CONDITIONS:
+                stage = f"decode_final_{condition}"
                 active_rgb = decode_wan_latents_torch(final_latents[condition], pipe.vae, torch)
                 vae_decodes += 1
                 observations[condition] = fixed_observer_torch(active_rgb, torch)[0].detach().float().cpu().tolist()
@@ -817,6 +826,7 @@ def run_g0_once(
                     "OFF_R2": _relative_rgb_rms(active_rgb, off_rgb_2, torch),
                 }
                 del active_rgb
+        stage = "evaluate_frozen_g0_metrics"
         metrics = evaluate_g0_metrics(
             observations,
             gradient_rms=gradient_diagnostics["rms"],
@@ -860,10 +870,12 @@ def run_g0_once(
             encoding="utf-8",
         )
         return result
-    except G0InstrumentationError:
-        raise
+    except G0InstrumentationError as exc:
+        raise G0InstrumentationError(f"{stage}: {exc}") from exc
     except Exception as exc:
-        raise G0InstrumentationError("real Wan G0 execution failed") from exc
+        raise G0InstrumentationError(
+            f"{stage}: {type(exc).__name__}: {exc}"
+        ) from exc
     finally:
         try:
             pipe.maybe_free_model_hooks()
