@@ -52,6 +52,23 @@ block14
 
 因此失败位于“relation 信号向 block/velocity 的传播、common-mode、时序稳定性和质量预算无法同时闭合”，而不是 relation interface 完全不可写。
 
+### 已完成的单-pair dictionary 诊断
+
+随后运行 `79f92e73ef3a6223`，结果包 SHA-256 为 `fbedc7cccdb31889621dfc6e228888062a1d22978601c273d753674777bab229`。该运行在同一 block14、`lambda=1`、Flow step4 与真实 OFF Q/K 上完成 exact10 calls，解析 screen 水平/垂直半径 `1..8` 的 16 个单-pair 候选，得到：
+
+```text
+PAIR_DICTIONARY_NO_GO
+```
+
+该结果同样不是 instrumentation failure：L4、真实 Q/K、调用计数、source identity、有限数值、canonical stats 与结果包均完整。具体诊断为：
+
+- 多数候选的 odd/ULP 已超过 `8`，说明改变 pair 半径可以提高 relation-level separation；
+- 少数候选的 even/odd 也满足 `<0.25`；
+- 但 16 个候选在 cond/uncond 的 normalized temporal variation 全部约为 `0.75--1.30`，没有候选接近 `<0.10`；
+- 因此没有任何单轴候选 eligible，也不存在可进入双轴组合判定的 pair。
+
+该结果排除的是 `block14 + lambda1 + Flow step4` 下的有限 radius1--8 单-pair字典。它进一步表明当前主要矛盾是时序稳定性，而不是单纯换一个更远的 Patch pair 即可解决。下一步不得扩大 radius 或重复单-pair扫描。
+
 ### lambda-only 结论
 
 不得把下一步设为单纯提高 `lambda`。在 `lambda=1` 附近的局部线性外推中：
@@ -67,7 +84,7 @@ block14
 | 模块 | 当前状态 | 结论边界 |
 | --- | --- | --- |
 | `state_generator` | `IMPLEMENTED_PARTIALLY / NOT_CHAIN_VALIDATED` | 已有 keyed 二维状态公式；完整 trajectory、public burst interleave 与真实生成时序写入尚未验证。 |
-| `relation_injector` | `REAL_VALIDATION_COMPLETED / NO_GO_THIS_CONSTRUCTION` | 真实接口与双轴写入成立；上述 block14/radius1/lambda1/step4 construction 失败，模块家族尚未被否定。 |
+| `relation_injector` | `REAL_VALIDATION_COMPLETED / SINGLE_PAIR_FAMILY_NO_GO_AT_CURRENT_BLOCK_FLOW` | 真实接口与双轴写入成立；block14/lambda1/step4 的 radius1 exact20 与 radius1--8 单-pair字典均失败，模块家族尚未被否定。 |
 | `relation_observer_2d` | `NOT_VALIDATED` | 尚无真实 saved-MP4 固定二维 observer 的 rank/condition/survival 结论。 |
 | `aisb_acquisition` | `NOT_VALIDATED_ON_TARGET_OBSERVATION` | 历史 pixel/synthetic 成功不是目标链证据。 |
 | `affine_equalizer_2d` | `NOT_VALIDATED_ON_TARGET_OBSERVATION` | 尚未在真实 observer 与冻结 public ambiguity set 上验证。 |
@@ -79,6 +96,7 @@ block14
 TARGET_METHOD_FEASIBILITY = INSUFFICIENT_TO_DECIDE
 FIRST_FAILED_STAGE = S1_REAL_DIT_RELATION_PRIMITIVE
 ACTIVE_MODULE = relation_injector
+CURRENT_RESULT = PAIR_DICTIONARY_NO_GO
 S2_S3_S4 = HOLD_UNTIL_S1_PASSES
 ```
 
@@ -615,11 +633,10 @@ B_1/B_2
 
 当前只允许按以下有限顺序推进；不得并行多路线探索：
 
-1. **单-pair dictionary screen（当前下一 GPU 节点）**：固定 block14、`lambda=1`、Flow step4、同一真实 OFF Q/K，screen 水平/垂直半径 `1..8` 的 16 个单-pair 候选。GPU 预算 exact10，只作解析 relation-level construction 选择，不作 block/velocity/S2 结论。
-2. 若得到唯一双轴候选：冻结其 Patch pairs，并只运行一次新的完整 exact20 S1。
-3. 若无单-pair 组合合格，或新 exact20 仍失败：进入一次**小型传播敏感度 screen**，只允许少量预冻结 block、局部邻域与单步/三步 Flow support；构造两个稀疏多-pair零和 basis，并允许固定 CFG-aware cond/uncond 配重。选择目标是 relation→block→velocity odd gain、低 common-mode、低 temporal variation、双轴低相关与质量预算同时成立。
-4. `lambda` 在该 screen 中仅作固定总能量下的从属线性检查，不得重新成为主搜索轴。多 Flow-step 使用固定总能量，不得通过无限累积扩大扰动。
-5. 唯一胜出 construction 才运行一次完整 S1；若该有限 screen 仍无 construction 通过，则结论为 `UNTRAINED_WAN_PATCH_RELATION_CARRIER_NOT_FEASIBLE`，停止当前无训练 Wan relation-carrier 路线，不得继续堆高 `lambda` 或用历史代理补位。
+1. **单-pair dictionary screen（已完成）**：block14、`lambda=1`、Flow step4、半径 `1..8` 的 exact10 结果为 `PAIR_DICTIONARY_NO_GO`；禁止重复或扩大半径扫描。
+2. **小型传播敏感度 screen（当前下一 GPU 节点）**：只允许少量预冻结 block、局部邻域与单步/三步 Flow support；构造两个稀疏多-pair零和 basis，并允许固定 CFG-aware cond/uncond 配重。选择目标是 relation→block→velocity odd gain、低 common-mode、低 temporal variation、双轴低相关与质量预算同时成立。
+3. `lambda` 在该 screen 中仅作固定总能量下的从属线性检查，不得重新成为主搜索轴。多 Flow-step 使用固定总能量，不得通过无限累积扩大扰动。
+4. 唯一胜出 construction 才运行一次完整 S1；若该有限 screen 仍无 construction 通过，则结论为 `UNTRAINED_WAN_PATCH_RELATION_CARRIER_NOT_FEASIBLE`，停止当前无训练 Wan relation-carrier 路线，不得继续堆高 `lambda` 或用历史代理补位。
 
 ### S2：真实 saved-MP4 二维可观测性
 
@@ -835,23 +852,23 @@ C_4:
 + correct-key / wrong-key / clean fixed-FPR zero-bit decision
 ```
 
-真实链已经进入 S1，并得到一个有效的 construction 负结果。当前唯一合法下一步不再是泛化的“实现 S1”，而是：
+真实链已经进入 S1，并得到一个 exact20 construction 负结果及一个有效的单-pair字典负结果。当前唯一合法下一步是：
 
 ```text
-S1_LOCAL_PAIR_DICTIONARY_EXACT10
+S1_PROPAGATION_SENSITIVITY_SCREEN
 ```
 
-即：执行已冻结的 `block14 / lambda1 / Flow step4` 单-pair dictionary screen，水平与垂直半径各 `1..8`，从同一真实 OFF Q/K 解析筛选传播更合适的双轴 Patch pairs。
+即：执行第 13 节定义的一次有限小型 construction screen，从传播敏感度而不是 relation 几何半径出发，选择稀疏多-pair零和二维 basis、有限 Flow support 与 CFG-aware branch 配重。
 
-该节点只允许输出：
+该节点的 construction-screen 终态只允许输出：
 
 ```text
-PAIR_DICTIONARY_READY
-PAIR_DICTIONARY_NO_GO
+PROPAGATION_CONSTRUCTION_READY
+PROPAGATION_CONSTRUCTION_NO_GO
 INSTRUMENTATION_INSUFFICIENT
 ```
 
-`PAIR_DICTIONARY_READY` 只允许冻结选中 pair 并进入一次新的 exact20；它本身不是 S1 通过。`PAIR_DICTIONARY_NO_GO` 必须进入第 13 节定义的小型传播敏感度、多-pair零和、CFG-aware、多 Flow-step construction screen，而不是扫描 `lambda`。
+`PROPAGATION_CONSTRUCTION_READY` 只允许冻结唯一 construction 并进入一次新的完整 S1；它本身不是 S1 通过。`PROPAGATION_CONSTRUCTION_NO_GO` 直接触发 `UNTRAINED_WAN_PATCH_RELATION_CARRIER_NOT_FEASIBLE`，不得再扫描 `lambda`、扩大字典或增加新代理。
 
 在 S1 通过前，不得继续 direct-output、attention-output residual、MLP observer、VAE carrier、pixel carrier、payload 或完整攻击评测路线。
 
@@ -918,6 +935,7 @@ INSTRUMENTATION_INSUFFICIENT
 ```text
 TARGET_METHOD_FEASIBILITY = INSUFFICIENT_TO_DECIDE
 FIRST_FAILED_STAGE = S1_REAL_DIT_RELATION_PRIMITIVE
-CURRENT_RESULT = S1_NO_GO_THIS_CONSTRUCTION
-NEXT_DIAGNOSTIC = S1_LOCAL_PAIR_DICTIONARY_EXACT10
+CURRENT_S1_RESULT = S1_NO_GO_THIS_CONSTRUCTION
+CURRENT_CONSTRUCTION_SCREEN_RESULT = PAIR_DICTIONARY_NO_GO
+NEXT_DIAGNOSTIC = S1_PROPAGATION_SENSITIVITY_SCREEN
 ```
