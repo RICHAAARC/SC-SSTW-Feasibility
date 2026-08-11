@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import gc
 import hashlib
 import json
 import math
 from pathlib import Path
 import platform
+import sys
 from typing import Any, Iterable, Mapping, Sequence
 
 
@@ -317,31 +320,55 @@ def common_axis_gradients_torch(
     for parameter in parameters:
         parameter.requires_grad_(False)
         parameter.grad = None
-    differentiable = base_latent.detach().clone().requires_grad_(True)
-    targets_g1 = tuple((1.0, 0.0) for _ in OBSERVER_FRAME_INDICES)
-    targets_g2 = tuple((0.0, 1.0) for _ in OBSERVER_FRAME_INDICES)
-    try:
-        save_on_cpu = getattr(torch_module.autograd.graph, "save_on_cpu", None)
-        context = save_on_cpu(pin_memory=True) if save_on_cpu is not None else _NullContext()
-        with torch_module.enable_grad(), context:
-            decoded = decode_wan_latents_torch(differentiable, vae, torch_module)
-            if not bool(decoded.requires_grad) or decoded.grad_fn is None:
-                raise G0InstrumentationError("Wan VAE decode is outside autograd")
-            loss_g1 = observer_projection_loss_torch(decoded, targets_g1, torch_module)
-            loss_g2 = observer_projection_loss_torch(decoded, targets_g2, torch_module)
-            gradient_g1 = torch_module.autograd.grad(
-                loss_g1, differentiable, retain_graph=True, create_graph=False
-            )[0]
-            gradient_g2 = torch_module.autograd.grad(
-                loss_g2, differentiable, retain_graph=False, create_graph=False
-            )[0]
-    except G0InstrumentationError:
-        raise
-    except Exception as exc:
-        raise G0InstrumentationError("fixed observer gradient is disconnected") from exc
+    targets = {
+        "G1": tuple((1.0, 0.0) for _ in OBSERVER_FRAME_INDICES),
+        "G2": tuple((0.0, 1.0) for _ in OBSERVER_FRAME_INDICES),
+    }
+    gradients: dict[str, Any] = {}
+    losses: dict[str, float] = {}
+    # Deliberately execute two independent VAE graphs.  Saving the full Wan VAE
+    # graph to pinned host RAM and retaining it for a second VJP can exhaust the
+    # Colab host and kill the whole runtime instead of raising a CUDA OOM.
+    for axis in ("G1", "G2"):
+        differentiable = base_latent.detach().clone().requires_grad_(True)
+        decoded = None
+        loss = None
+        gradient = None
+        _emit_progress(f"vae_vjp_{axis}_start", torch_module)
+        try:
+            with torch_module.enable_grad():
+                decoded = decode_wan_latents_torch(differentiable, vae, torch_module)
+                if not bool(decoded.requires_grad) or decoded.grad_fn is None:
+                    raise G0InstrumentationError("Wan VAE decode is outside autograd")
+                loss = observer_projection_loss_torch(
+                    decoded, targets[axis], torch_module
+                )
+                gradient = torch_module.autograd.grad(
+                    loss,
+                    differentiable,
+                    retain_graph=False,
+                    create_graph=False,
+                )[0]
+            gradients[axis] = gradient.detach()
+            losses[axis] = float(loss.detach().float().item())
+        except G0InstrumentationError:
+            raise
+        except Exception as exc:
+            raise G0InstrumentationError(
+                f"fixed observer {axis} gradient is disconnected"
+            ) from exc
+        finally:
+            # Ensure the axis-local graph is dead before constructing the next.
+            decoded = None
+            loss = None
+            gradient = None
+            differentiable = None
+            gc.collect()
+            if bool(torch_module.cuda.is_available()):
+                torch_module.cuda.empty_cache()
+        _emit_progress(f"vae_vjp_{axis}_complete", torch_module)
     if any(parameter.grad is not None for parameter in parameters):
         raise G0InstrumentationError("G0 accumulated a VAE parameter gradient")
-    gradients = {"G1": gradient_g1.detach(), "G2": gradient_g2.detach()}
     rms = {
         axis: _tensor_rms_float(gradient, torch_module)
         for axis, gradient in gradients.items()
@@ -350,7 +377,7 @@ def common_axis_gradients_torch(
         raise G0InstrumentationError("fixed observer gradient RMS is zero")
     cosine = _tensor_cosine_float(gradients["G1"], gradients["G2"], torch_module)
     return gradients, {
-        "loss": {"G1": float(loss_g1.detach().float().item()), "G2": float(loss_g2.detach().float().item())},
+        "loss": losses,
         "rms": rms,
         "cosine": cosine,
         "absolute_cosine": abs(cosine),
@@ -414,12 +441,24 @@ def _scheduler_state_value(value: Any, torch_module: Any) -> Any:
     return {"kind": f"{type(value).__module__}.{type(value).__qualname__}", "repr": repr(value)}
 
 
-class _NullContext:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, traceback):
-        return False
+def _emit_progress(stage: str, torch_module: Any | None = None) -> None:
+    report: dict[str, Any] = {
+        "event": "G0_PROGRESS",
+        "stage": stage,
+        "utc": datetime.now(timezone.utc).isoformat(),
+    }
+    if torch_module is not None and bool(torch_module.cuda.is_available()):
+        report["cuda_allocated_gib"] = round(
+            float(torch_module.cuda.memory_allocated()) / (2**30), 3
+        )
+        report["cuda_reserved_gib"] = round(
+            float(torch_module.cuda.memory_reserved()) / (2**30), 3
+        )
+    print(
+        json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def scheduler_state_summary(scheduler: Any, torch_module: Any) -> dict[str, Any]:
@@ -730,6 +769,7 @@ def run_g0_once(
     stage = "runtime_ready"
     try:
         stage = "encode_prompt_and_prepare_latent"
+        _emit_progress(stage, torch)
         with torch.inference_mode():
             prompt_embeddings, negative_embeddings = pipe.encode_prompt(
                 prompt=generation["prompt"],
@@ -761,6 +801,7 @@ def run_g0_once(
             ).detach()
             for index in range(int(config["guidance"]["active_after_scheduler_index"]) + 1):
                 stage = f"prefix_transformer_step_{index}"
+                _emit_progress(stage, torch)
                 conditional = _transformer_velocity(
                     pipe, latent, timesteps[index], prompt_embeddings, "cond", torch
                 )
@@ -777,10 +818,12 @@ def run_g0_once(
                 del conditional, unconditional, guided
         boundary_latent = latent.detach().clone()
         stage = "capture_unipc_after_step_5"
+        _emit_progress(stage, torch)
         scheduler_snapshot, scheduler_summary = capture_unipc_snapshot(
             pipe.scheduler, torch, expected_step_index=6
         )
         stage = "differentiable_vae_observer_gradient"
+        _emit_progress(stage, torch)
         gradients, gradient_diagnostics = common_axis_gradients_torch(
             boundary_latent, pipe.vae, torch
         )
@@ -794,6 +837,7 @@ def run_g0_once(
         del gradients
         for condition in G0_CONDITION_ORDER:
             stage = f"continue_condition_{condition}"
+            _emit_progress(stage, torch)
             final_latents[condition], calls = _continue_condition(
                 pipe,
                 condition_latents[condition],
@@ -810,16 +854,19 @@ def run_g0_once(
         rgb_relative: dict[str, dict[str, float]] = {}
         with torch.inference_mode():
             stage = "decode_final_OFF_R1"
+            _emit_progress(stage, torch)
             off_rgb_1 = decode_wan_latents_torch(final_latents["OFF_R1"], pipe.vae, torch)
             vae_decodes += 1
             observations["OFF_R1"] = fixed_observer_torch(off_rgb_1, torch)[0].detach().float().cpu().tolist()
             stage = "decode_final_OFF_R2"
+            _emit_progress(stage, torch)
             off_rgb_2 = decode_wan_latents_torch(final_latents["OFF_R2"], pipe.vae, torch)
             vae_decodes += 1
             observations["OFF_R2"] = fixed_observer_torch(off_rgb_2, torch)[0].detach().float().cpu().tolist()
             off_rgb_floor = _relative_rgb_rms(off_rgb_2, off_rgb_1, torch)
             for condition in G0_ACTIVE_CONDITIONS:
                 stage = f"decode_final_{condition}"
+                _emit_progress(stage, torch)
                 active_rgb = decode_wan_latents_torch(final_latents[condition], pipe.vae, torch)
                 vae_decodes += 1
                 observations[condition] = fixed_observer_torch(active_rgb, torch)[0].detach().float().cpu().tolist()
@@ -829,6 +876,7 @@ def run_g0_once(
                 }
                 del active_rgb
         stage = "evaluate_frozen_g0_metrics"
+        _emit_progress(stage, torch)
         metrics = evaluate_g0_metrics(
             observations,
             gradient_rms=gradient_diagnostics["rms"],
