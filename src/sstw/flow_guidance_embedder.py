@@ -8,11 +8,12 @@ observer, or inspect a result in order to tune the construction.
 from __future__ import annotations
 
 import copy
-from contextlib import nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import gc
 import hashlib
+import importlib
 import json
 import math
 from pathlib import Path
@@ -310,6 +311,94 @@ def decode_wan_latents_torch(latents: Any, vae: Any, torch_module: Any) -> Any:
     return decoded
 
 
+@contextmanager
+def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
+    """Checkpoint recurrent Wan decoder frames without changing its math.
+
+    Diffusers decodes the 13 latent frames serially while carrying causal
+    feature maps.  A normal autograd run retains every frame's internal
+    activations and exceeds a 40 GiB device.  The first frame initializes the
+    heterogeneous cache; later frames are pure tensor-to-tensor recurrence and
+    can be checkpointed independently.  This retains only the public causal
+    cache between frames and recomputes local activations during backward.
+    """
+
+    try:
+        checkpoint_module = importlib.import_module(
+            f"{torch_module.__name__}.utils.checkpoint"
+        )
+        checkpoint_fn = checkpoint_module.checkpoint
+    except Exception as exc:
+        raise G0InstrumentationError(
+            "Wan decoder checkpoint capability is unavailable"
+        ) from exc
+    decoder = getattr(vae, "decoder", None)
+    if decoder is None:
+        raise G0InstrumentationError("Wan decoder checkpoint capability is unavailable")
+    original_forward = decoder.forward
+    call_index = 0
+
+    def checkpointed_forward(x, feat_cache=None, feat_idx=None, first_chunk=False):
+        nonlocal call_index
+        if feat_cache is None:
+            raise G0InstrumentationError("Wan decoder causal cache is unavailable")
+        if feat_idx is None or feat_idx[0] != 0:
+            raise G0InstrumentationError("Wan decoder cache index is invalid")
+        if call_index == 0:
+            call_index += 1
+            return original_forward(x, feat_cache, feat_idx, first_chunk=first_chunk)
+
+        layout: list[tuple[str, int | None]] = []
+        cache_tensors: list[Any] = []
+        for item in feat_cache:
+            if torch_module.is_tensor(item):
+                layout.append(("tensor", len(cache_tensors)))
+                cache_tensors.append(item)
+            elif item == "Rep":
+                layout.append(("rep", None))
+            else:
+                raise G0InstrumentationError("Wan decoder cache contains an unexpected value")
+
+        def functional_frame(x_value, *cache_values):
+            local_cache: list[Any] = []
+            for kind, index in layout:
+                local_cache.append("Rep" if kind == "rep" else cache_values[int(index)])
+            local_index = [0]
+            output = original_forward(
+                x_value,
+                local_cache,
+                local_index,
+                first_chunk=first_chunk,
+            )
+            if local_index[0] != len(local_cache):
+                raise G0InstrumentationError("Wan decoder did not consume its full causal cache")
+            if any(not torch_module.is_tensor(value) for value in local_cache):
+                raise G0InstrumentationError("Wan decoder cache did not become tensor-only")
+            return (output, *local_cache)
+
+        outputs = checkpoint_fn(
+            functional_frame,
+            x,
+            *cache_tensors,
+            use_reentrant=False,
+            preserve_rng_state=False,
+        )
+        if not isinstance(outputs, tuple) or len(outputs) != len(feat_cache) + 1:
+            raise G0InstrumentationError("Wan decoder checkpoint output is malformed")
+        feat_cache[:] = list(outputs[1:])
+        feat_idx[0] = len(feat_cache)
+        call_index += 1
+        return outputs[0]
+
+    decoder.forward = checkpointed_forward
+    try:
+        yield
+        if call_index != 13:
+            raise G0InstrumentationError("Wan decoder did not process exactly 13 latent frames")
+    finally:
+        decoder.forward = original_forward
+
+
 def common_axis_gradients_torch(
     base_latent: Any,
     vae: Any,
@@ -337,16 +426,12 @@ def common_axis_gradients_torch(
         gradient = None
         _emit_progress(f"vae_vjp_{axis}_start", torch_module)
         try:
-            save_on_cpu = getattr(torch_module.autograd.graph, "save_on_cpu", None)
-            saved_tensor_context = (
-                save_on_cpu(pin_memory=False)
-                if save_on_cpu is not None
-                else nullcontext()
-            )
-            # One axis at a time, with saved activations in ordinary host RAM.
-            # pin_memory=False avoids the locked-host-memory failure mode seen
-            # in the superseded two-axis retained-graph implementation.
-            with torch_module.enable_grad(), saved_tensor_context:
+            # Segment the recurrent decoder by latent frame.  This recomputes
+            # local activations during backward instead of storing all 13
+            # frames on either GPU or host memory.
+            with torch_module.enable_grad(), _checkpoint_wan_decoder_frames(
+                vae, torch_module
+            ):
                 decoded = decode_wan_latents_torch(differentiable, vae, torch_module)
                 if not bool(decoded.requires_grad) or decoded.grad_fn is None:
                     raise G0InstrumentationError("Wan VAE decode is outside autograd")
