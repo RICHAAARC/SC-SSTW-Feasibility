@@ -95,9 +95,9 @@ def test_scheduler_tensor_hash_flattens_before_uint8_view() -> None:
     assert "contiguous.view(torch_module.uint8)" not in source
 
 
-def test_vjp_memory_path_never_pins_or_retains_full_vae_graph() -> None:
+def test_vjp_memory_path_offloads_each_independent_axis_without_pinning() -> None:
     source = (ROOT / "src/sstw/flow_guidance_embedder.py").read_text()
-    assert "save_on_cpu" not in source
+    assert "save_on_cpu(pin_memory=False)" in source
     assert "pin_memory=True" not in source
     assert "retain_graph=True" not in source
     assert 'for axis in ("G1", "G2")' in source

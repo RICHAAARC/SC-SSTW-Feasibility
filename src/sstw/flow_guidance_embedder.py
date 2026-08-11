@@ -8,6 +8,7 @@ observer, or inspect a result in order to tune the construction.
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import gc
@@ -336,7 +337,16 @@ def common_axis_gradients_torch(
         gradient = None
         _emit_progress(f"vae_vjp_{axis}_start", torch_module)
         try:
-            with torch_module.enable_grad():
+            save_on_cpu = getattr(torch_module.autograd.graph, "save_on_cpu", None)
+            saved_tensor_context = (
+                save_on_cpu(pin_memory=False)
+                if save_on_cpu is not None
+                else nullcontext()
+            )
+            # One axis at a time, with saved activations in ordinary host RAM.
+            # pin_memory=False avoids the locked-host-memory failure mode seen
+            # in the superseded two-axis retained-graph implementation.
+            with torch_module.enable_grad(), saved_tensor_context:
                 decoded = decode_wan_latents_torch(differentiable, vae, torch_module)
                 if not bool(decoded.requires_grad) or decoded.grad_fn is None:
                     raise G0InstrumentationError("Wan VAE decode is outside autograd")
