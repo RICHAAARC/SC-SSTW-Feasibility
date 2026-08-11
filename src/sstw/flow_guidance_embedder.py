@@ -393,7 +393,9 @@ def condition_latents_from_common_gradients_torch(
 def _scheduler_state_value(value: Any, torch_module: Any) -> Any:
     if torch_module.is_tensor(value):
         contiguous = value.detach().contiguous().to(device="cpu")
-        raw = contiguous.view(torch_module.uint8).reshape(-1).numpy().tobytes()
+        # A 0-D Long tensor cannot directly change element size through view().
+        # Flatten first so scalars and non-scalars share the same exact-byte path.
+        raw = contiguous.reshape(-1).view(torch_module.uint8).numpy().tobytes()
         return {
             "kind": "tensor",
             "shape": list(contiguous.shape),

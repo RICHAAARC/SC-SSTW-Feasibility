@@ -87,3 +87,9 @@ def test_effect_must_exceed_frozen_off_and_numeric_floor() -> None:
     assert failed["status"] == "FLOW_GUIDANCE_PRIMITIVE_NOT_FEASIBLE"
     assert failed["checks"]["g1_odd_above_floor"] is False
     json.dumps(failed, allow_nan=False)
+
+
+def test_scheduler_tensor_hash_flattens_before_uint8_view() -> None:
+    source = (ROOT / "src/sstw/flow_guidance_embedder.py").read_text()
+    assert "contiguous.reshape(-1).view(torch_module.uint8)" in source
+    assert "contiguous.view(torch_module.uint8)" not in source
