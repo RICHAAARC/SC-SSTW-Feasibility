@@ -354,15 +354,25 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
             if torch_module.is_tensor(item):
                 layout.append(("tensor", len(cache_tensors)))
                 cache_tensors.append(item)
+            elif item is None:
+                layout.append(("none", None))
             elif item == "Rep":
                 layout.append(("rep", None))
             else:
                 raise G0InstrumentationError("Wan decoder cache contains an unexpected value")
 
+        expected_output_layout: tuple[str, ...] | None = None
+
         def functional_frame(x_value, *cache_values):
+            nonlocal expected_output_layout
             local_cache: list[Any] = []
             for kind, index in layout:
-                local_cache.append("Rep" if kind == "rep" else cache_values[int(index)])
+                if kind == "tensor":
+                    local_cache.append(cache_values[int(index)])
+                elif kind == "rep":
+                    local_cache.append("Rep")
+                else:
+                    local_cache.append(None)
             local_index = [0]
             output = original_forward(
                 x_value,
@@ -372,9 +382,28 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
             )
             if local_index[0] != len(local_cache):
                 raise G0InstrumentationError("Wan decoder did not consume its full causal cache")
-            if any(not torch_module.is_tensor(value) for value in local_cache):
-                raise G0InstrumentationError("Wan decoder cache did not become tensor-only")
-            return (output, *local_cache)
+            output_layout: list[str] = []
+            output_tensors: list[Any] = []
+            for value in local_cache:
+                if torch_module.is_tensor(value):
+                    output_layout.append("tensor")
+                    output_tensors.append(value)
+                elif value is None:
+                    output_layout.append("none")
+                elif value == "Rep":
+                    output_layout.append("rep")
+                else:
+                    raise G0InstrumentationError(
+                        "Wan decoder produced an unexpected cache value"
+                    )
+            current_layout = tuple(output_layout)
+            if expected_output_layout is None:
+                expected_output_layout = current_layout
+            elif current_layout != expected_output_layout:
+                raise G0InstrumentationError(
+                    "Wan decoder cache layout changed during checkpoint recomputation"
+                )
+            return (output, *output_tensors)
 
         outputs = checkpoint_fn(
             functional_frame,
@@ -383,9 +412,20 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
             use_reentrant=False,
             preserve_rng_state=False,
         )
-        if not isinstance(outputs, tuple) or len(outputs) != len(feat_cache) + 1:
+        if expected_output_layout is None or not isinstance(outputs, tuple):
             raise G0InstrumentationError("Wan decoder checkpoint output is malformed")
-        feat_cache[:] = list(outputs[1:])
+        if len(outputs) != 1 + expected_output_layout.count("tensor"):
+            raise G0InstrumentationError("Wan decoder checkpoint output is malformed")
+        tensor_iterator = iter(outputs[1:])
+        reconstructed_cache: list[Any] = []
+        for kind in expected_output_layout:
+            if kind == "tensor":
+                reconstructed_cache.append(next(tensor_iterator))
+            elif kind == "rep":
+                reconstructed_cache.append("Rep")
+            else:
+                reconstructed_cache.append(None)
+        feat_cache[:] = reconstructed_cache
         feat_idx[0] = len(feat_cache)
         call_index += 1
         return outputs[0]
