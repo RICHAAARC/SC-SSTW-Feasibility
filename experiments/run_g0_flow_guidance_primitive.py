@@ -36,7 +36,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = run_g0_once(repo_root=ROOT, output=args.output)
-    except (G0InstrumentationError, OSError, RuntimeError, TypeError, ValueError) as exc:
+    except Exception as exc:
         report = {
             "status": "INSTRUMENTATION_INSUFFICIENT",
             "diagnostic_class": "DIAGNOSTIC_ONLY",

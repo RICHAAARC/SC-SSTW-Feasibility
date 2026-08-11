@@ -16,9 +16,11 @@ import hashlib
 import importlib
 import json
 import math
+import os
 from pathlib import Path
 import platform
 import sys
+import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 
@@ -107,14 +109,14 @@ def fixed_observer_torch(decoded_rgb, torch_module):
         raise ValueError("decoded RGB must have shape [B,3,49,320,512]")
     if decoded_rgb.ndim != 5 or int(decoded_rgb.shape[0]) < 1:
         raise ValueError("decoded RGB must have a non-empty batch")
-    rgb = decoded_rgb.float().index_select(
+    rgb = decoded_rgb.index_select(
         2,
         torch_module.tensor(
             OBSERVER_FRAME_INDICES,
             device=decoded_rgb.device,
             dtype=torch_module.long,
         ),
-    )
+    ).float()
     horizontal = _normalized_cosine(
         512, torch_module, device=rgb.device, dtype=rgb.dtype
     ).view(1, 1, 1, 512)
@@ -317,10 +319,8 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
 
     Diffusers decodes the 13 latent frames serially while carrying causal
     feature maps.  A normal autograd run retains every frame's internal
-    activations and exceeds a 40 GiB device.  The first frame initializes the
-    heterogeneous cache; later frames are pure tensor-to-tensor recurrence and
-    can be checkpointed independently.  This retains only the public causal
-    cache between frames and recomputes local activations during backward.
+    activations.  Every frame, including the cache-initializing first frame,
+    is checkpointed so local activations are recomputed during backward.
     """
 
     try:
@@ -344,10 +344,6 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
             raise G0InstrumentationError("Wan decoder causal cache is unavailable")
         if feat_idx is None or feat_idx[0] != 0:
             raise G0InstrumentationError("Wan decoder cache index is invalid")
-        if call_index == 0:
-            call_index += 1
-            return original_forward(x, feat_cache, feat_idx, first_chunk=first_chunk)
-
         layout: list[tuple[str, int | None]] = []
         cache_tensors: list[Any] = []
         for item in feat_cache:
@@ -362,9 +358,10 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
                 raise G0InstrumentationError("Wan decoder cache contains an unexpected value")
 
         expected_output_layout: tuple[str, ...] | None = None
+        expected_consumed_index: int | None = None
 
         def functional_frame(x_value, *cache_values):
-            nonlocal expected_output_layout
+            nonlocal expected_output_layout, expected_consumed_index
             local_cache: list[Any] = []
             for kind, index in layout:
                 if kind == "tensor":
@@ -380,8 +377,15 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
                 local_index,
                 first_chunk=first_chunk,
             )
-            if local_index[0] != len(local_cache):
-                raise G0InstrumentationError("Wan decoder did not consume its full causal cache")
+            consumed_index = int(local_index[0])
+            if consumed_index <= 0 or consumed_index > len(local_cache):
+                raise G0InstrumentationError("Wan decoder causal cache index is invalid")
+            if expected_consumed_index is None:
+                expected_consumed_index = consumed_index
+            elif consumed_index != expected_consumed_index:
+                raise G0InstrumentationError(
+                    "Wan decoder cache consumption changed during checkpoint recomputation"
+                )
             output_layout: list[str] = []
             output_tensors: list[Any] = []
             for value in local_cache:
@@ -426,7 +430,9 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
             else:
                 reconstructed_cache.append(None)
         feat_cache[:] = reconstructed_cache
-        feat_idx[0] = len(feat_cache)
+        if expected_consumed_index is None:
+            raise G0InstrumentationError("Wan decoder cache consumption is unavailable")
+        feat_idx[0] = expected_consumed_index
         call_index += 1
         return outputs[0]
 
@@ -437,6 +443,83 @@ def _checkpoint_wan_decoder_frames(vae: Any, torch_module: Any):
             raise G0InstrumentationError("Wan decoder did not process exactly 13 latent frames")
     finally:
         decoder.forward = original_forward
+
+
+def wan_checkpoint_canary_torch(
+    torch_module: Any,
+    autoencoder_class: Any,
+    device: Any,
+) -> dict[str, float | int]:
+    """Exercise the real Wan decoder cache and checkpoint backward on a tiny model."""
+
+    generator = torch_module.Generator(device="cpu").manual_seed(1907)
+    model = autoencoder_class(
+        base_dim=8,
+        decoder_base_dim=8,
+        z_dim=16,
+        dim_mult=[1, 1, 1, 1],
+        num_res_blocks=1,
+        attn_scales=(),
+        temperal_downsample=[False, True, True],
+    ).eval().to(device=device, dtype=torch_module.float32)
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+        parameter.grad = None
+    base = torch_module.randn(
+        (1, 16, 13, 4, 8), generator=generator, dtype=torch_module.float32
+    ).to(device)
+
+    direct_input = base.detach().clone().requires_grad_(True)
+    direct_output = model.decode(direct_input, return_dict=False)[0]
+    direct_loss = direct_output.square().mean()
+    direct_gradient = torch_module.autograd.grad(direct_loss, direct_input)[0].detach()
+    model.clear_cache()
+
+    checkpoint_input = base.detach().clone().requires_grad_(True)
+    with _checkpoint_wan_decoder_frames(model, torch_module):
+        checkpoint_output = model.decode(checkpoint_input, return_dict=False)[0]
+        checkpoint_loss = checkpoint_output.square().mean()
+        checkpoint_gradient = torch_module.autograd.grad(
+            checkpoint_loss, checkpoint_input
+        )[0].detach()
+    model.clear_cache()
+    if tuple(direct_output.shape) != (1, 3, 49, 32, 64):
+        raise G0InstrumentationError("Wan checkpoint canary output shape changed")
+    if not bool(torch_module.isfinite(checkpoint_gradient).all().item()):
+        raise G0InstrumentationError("Wan checkpoint canary gradient is non-finite")
+    if _tensor_rms_float(checkpoint_gradient, torch_module) <= 0.0:
+        raise G0InstrumentationError("Wan checkpoint canary gradient is zero")
+    output_error = float(
+        (checkpoint_output.detach() - direct_output.detach()).abs().max().item()
+    )
+    gradient_error = float(
+        (checkpoint_gradient - direct_gradient).abs().max().item()
+    )
+    if not bool(
+        torch_module.allclose(
+            checkpoint_output.detach(), direct_output.detach(), rtol=1.0e-4, atol=1.0e-5
+        )
+    ) or not bool(
+        torch_module.allclose(
+            checkpoint_gradient, direct_gradient, rtol=1.0e-4, atol=1.0e-5
+        )
+    ):
+        raise G0InstrumentationError("Wan checkpoint canary changed output or gradient")
+    if any(parameter.grad is not None for parameter in model.parameters()):
+        raise G0InstrumentationError("Wan checkpoint canary accumulated parameter gradients")
+    diagnostics = {
+        "latent_frames": 13,
+        "decoded_frames": 49,
+        "maximum_output_absolute_error": output_error,
+        "maximum_gradient_absolute_error": gradient_error,
+        "gradient_rms": _tensor_rms_float(checkpoint_gradient, torch_module),
+    }
+    del model, base, direct_input, direct_output, direct_loss, direct_gradient
+    del checkpoint_input, checkpoint_output, checkpoint_loss, checkpoint_gradient
+    gc.collect()
+    if bool(torch_module.cuda.is_available()):
+        torch_module.cuda.empty_cache()
+    return diagnostics
 
 
 def common_axis_gradients_torch(
@@ -529,6 +612,20 @@ def condition_latents_from_common_gradients_torch(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Create OFF and signed active forks without recomputing either gradient."""
 
+    if set(gradients) != {"G1", "G2"}:
+        raise G0InstrumentationError("G0 gradient axis set changed")
+    if tuple(base_latent.shape) != (1, 16, 13, 40, 64):
+        raise G0InstrumentationError("G0 base latent shape changed")
+    if not bool(torch_module.isfinite(base_latent).all().item()):
+        raise G0InstrumentationError("G0 base latent is non-finite")
+    for axis in ("G1", "G2"):
+        gradient = gradients[axis]
+        if (
+            tuple(gradient.shape) != tuple(base_latent.shape)
+            or gradient.device != base_latent.device
+            or not bool(torch_module.isfinite(gradient).all().item())
+        ):
+            raise G0InstrumentationError(f"G0 {axis} gradient identity changed")
     update_g1, diagnostics_g1 = normalized_guidance_update_torch(
         base_latent,
         gradients["G1"],
@@ -549,6 +646,27 @@ def condition_latents_from_common_gradients_torch(
         "PLUS_G2": (base_latent + update_g2).detach(),
         "MINUS_G2": (base_latent - update_g2).detach(),
     }
+    if tuple(condition_latents) != G0_CONDITION_ORDER:
+        raise G0InstrumentationError("G0 condition order changed")
+    for condition, value in condition_latents.items():
+        if (
+            tuple(value.shape) != tuple(base_latent.shape)
+            or value.device != base_latent.device
+            or not bool(torch_module.isfinite(value).all().item())
+        ):
+            raise G0InstrumentationError(f"G0 {condition} latent identity changed")
+    if not bool(torch_module.equal(condition_latents["OFF_R1"], condition_latents["OFF_R2"])):
+        raise G0InstrumentationError("G0 OFF repeat latents differ")
+    if condition_latents["OFF_R1"].data_ptr() == condition_latents["OFF_R2"].data_ptr():
+        raise G0InstrumentationError("G0 OFF repeat latents alias")
+    for axis in ("G1", "G2"):
+        plus = condition_latents[f"PLUS_{axis}"]
+        minus = condition_latents[f"MINUS_{axis}"]
+        if plus.data_ptr() == minus.data_ptr() or plus.data_ptr() == base_latent.data_ptr():
+            raise G0InstrumentationError(f"G0 {axis} active latents alias")
+        midpoint = (plus.float() + minus.float()) * 0.5
+        if not bool(torch_module.allclose(midpoint, base_latent.float(), rtol=1.0e-6, atol=1.0e-7)):
+            raise G0InstrumentationError(f"G0 {axis} signed updates are not symmetric")
     return condition_latents, {"G1": diagnostics_g1, "G2": diagnostics_g2}
 
 
@@ -752,6 +870,8 @@ def evaluate_g0_metrics(
         ]
         worst_even_ratio = max(finite_even_ratios) if len(finite_even_ratios) == 2 else None
         axes[axis_name] = {
+            "own_values": list(own),
+            "own_positive_fraction": sum(value > 0.0 for value in own) / len(own),
             "own_mean": own_mean,
             "own_rms": own_rms,
             "cross_rms": cross_rms,
@@ -837,9 +957,16 @@ def _continue_condition(
     torch_module: Any,
 ) -> tuple[Any, int]:
     scheduler = fork_unipc_snapshot(scheduler_snapshot, scheduler_summary, torch_module)
+    if int(scheduler._step_index) != 6:
+        raise G0InstrumentationError("condition UniPC fork did not start at step 6")
     result = latent.detach().clone()
+    expected_shape = tuple(result.shape)
+    expected_dtype = result.dtype
+    expected_device = result.device
     calls = 0
     for index in config["guidance"]["normal_steps_remaining"]:
+        if int(scheduler._step_index) != int(index):
+            raise G0InstrumentationError("condition UniPC step index drifted")
         conditional = _transformer_velocity(
             pipe, result, timesteps[index], prompt_embeddings, "cond", torch_module
         )
@@ -854,7 +981,16 @@ def _continue_condition(
             result = scheduler.step(
                 guided, timesteps[index], result, return_dict=False
             )[0].detach()
+        if (
+            tuple(result.shape) != expected_shape
+            or result.dtype != expected_dtype
+            or result.device != expected_device
+            or not bool(torch_module.isfinite(result).all().item())
+        ):
+            raise G0InstrumentationError("condition latent identity changed")
         del conditional, unconditional, guided
+    if calls != 4 or int(scheduler._step_index) != 8:
+        raise G0InstrumentationError("condition UniPC fork did not finish at step 8")
     if scheduler_state_summary(scheduler_snapshot, torch_module) != scheduler_summary:
         raise G0InstrumentationError("retained UniPC snapshot changed during continuation")
     return result, calls
@@ -877,12 +1013,19 @@ def run_g0_once(
 
     if output.exists() or output.is_symlink() or not output.parent.is_dir():
         raise G0InstrumentationError("output must be absent below an existing directory")
+    try:
+        with tempfile.NamedTemporaryFile(dir=output.parent, prefix=".g0-write-probe-") as probe:
+            probe.write(b"G0")
+            probe.flush()
+            os.fsync(probe.fileno())
+    except Exception as exc:
+        raise G0InstrumentationError("G0 output parent is not writable") from exc
     config_file = config_path or repo_root / "configs/g0_flow_guidance_primitive.json"
     config = load_g0_config(config_file)
     try:
         import diffusers
         import torch
-        from diffusers import WanPipeline
+        from diffusers import AutoencoderKLWan, WanPipeline
     except Exception as exc:
         raise G0InstrumentationError("G0 runtime dependencies are unavailable") from exc
     runtime = runtime_capability_diagnostics(torch)
@@ -898,6 +1041,10 @@ def run_g0_once(
     except Exception as exc:
         raise G0InstrumentationError("real Wan pipeline could not be loaded") from exc
     device = pipe._execution_device
+    _emit_progress("real_wan_checkpoint_canary", torch)
+    checkpoint_canary = wan_checkpoint_canary_torch(
+        torch, AutoencoderKLWan, device
+    )
     transformer_calls = 0
     vae_decodes = 0
     final_latents: dict[str, Any] = {}
@@ -922,7 +1069,7 @@ def run_g0_once(
             timesteps = pipe.scheduler.timesteps
             if len(timesteps) != 8:
                 raise G0InstrumentationError("Wan scheduler did not expose exactly eight steps")
-            generator = torch.Generator(device="cuda").manual_seed(int(generation["seed"]))
+            generator = torch.Generator(device=device).manual_seed(int(generation["seed"]))
             latent = pipe.prepare_latents(
                 1,
                 int(pipe.transformer.config.in_channels),
@@ -962,7 +1109,7 @@ def run_g0_once(
         gradients, gradient_diagnostics = common_axis_gradients_torch(
             boundary_latent, pipe.vae, torch
         )
-        vae_decodes += 1
+        vae_decodes += 2
         condition_latents, update_diagnostics = condition_latents_from_common_gradients_torch(
             boundary_latent,
             gradients,
@@ -970,6 +1117,13 @@ def run_g0_once(
             relative_update_rms=float(config["guidance"]["relative_update_rms"]),
         )
         del gradients
+        # The generation order returns from VAE to transformer, which is the
+        # reverse of the pipeline's normal offload sequence.  Explicitly free
+        # and reinstall hooks so VAE weights cannot remain resident beside the
+        # transformer during the six continuation branches.
+        pipe.maybe_free_model_hooks()
+        gc.collect()
+        torch.cuda.empty_cache()
         for condition in G0_CONDITION_ORDER:
             stage = f"continue_condition_{condition}"
             _emit_progress(stage, torch)
@@ -1026,6 +1180,7 @@ def run_g0_once(
             "diagnostic_class": "DIAGNOSTIC_ONLY",
             "status": metrics["status"],
             "runtime": runtime,
+            "checkpoint_canary": checkpoint_canary,
             "scheduler": {
                 "class": type(pipe.scheduler).__name__,
                 "timesteps": [float(value.detach().float().item()) for value in timesteps],
@@ -1047,13 +1202,18 @@ def run_g0_once(
                 "Viterbi_was_run": False,
             },
         }
-        if transformer_calls != 36 or vae_decodes != 7:
+        if transformer_calls != 36 or vae_decodes != 8:
             raise G0InstrumentationError("G0 execution budget changed")
         output.mkdir()
-        (output / "result.json").write_text(
-            json.dumps(result, sort_keys=True, indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
+        result_bytes = (
+            json.dumps(result, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        temporary_result = output / ".result.json.tmp"
+        with temporary_result.open("xb") as handle:
+            handle.write(result_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_result, output / "result.json")
         return result
     except G0InstrumentationError as exc:
         raise G0InstrumentationError(f"{stage}: {exc}") from exc
