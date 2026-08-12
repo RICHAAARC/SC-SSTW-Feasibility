@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "protocol_id": "sstw_noise_g0_structured_initial_noise",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "model": {"repository": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers", "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"},
+  "generation": {
+    "prompt": "locked camera, a small red sailboat crossing a calm silver lake beneath distant green hills, soft morning light, no text, no cuts",
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple subjects, flicker",
+    "seed": 73129, "guidance_scale": 5.0, "max_sequence_length": 226,
+    "inference_steps": 8, "frames": 49, "height": 320, "width": 512, "fps": 8
+  },
+  "carrier": {
+    "relative_initial_noise_rms": 0.03,
+    "conditions": ["OFF_R1", "OFF_R2", "A", "B"],
+    "basis": {"a_channels": [0, 1], "b_channels": [2, 3], "spatial_cycles": 1},
+    "trajectory": {
+      "length": 13, "omega_0": 0.483321946706122, "delta_phi": 0.39269908169872414,
+      "initial_phase_a": 0.19634954084936207, "initial_phase_b": 1.1780972450961724,
+      "delta_times": [1,1,1,1,1,1,1,1,1,1,1,1],
+      "key_a_hex": "535354572d6e6f6973652d47302d412d7075626c6963",
+      "key_b_hex": "535354572d6e6f6973652d47302d422d7075626c6963"
+    }
+  },
+  "criteria": {
+    "minimum_effect_to_floor_ratio": 8.0,
+    "numeric_floor_float32_eps_multiplier": 32.0,
+    "maximum_channel_condition_number": 10.0,
+    "maximum_fit_relative_residual": 0.5,
+    "maximum_saved_mp4_relative_rms": 0.02
+  }
+}

@@ -5,7 +5,7 @@
 > 当前版本：`SSTW-v2`
 > 产品形态：生成时嵌入、零比特、单视频盲检测视频水印
 > 证据类别：`DIAGNOSTIC_ONLY`
-> 当前状态：`FLOW_GUIDANCE_2D_SUBSPACE_FEASIBLE_ON_ONE_CONTENT`
+> 当前状态：`SSTW_V2_FLOW_GUIDED_OBSERVER_NOT_FEASIBLE`
 
 本文件是活跃仓库的方法身份、允许实现和下一科学问题的唯一权威。历史 Q/K relation 代码与实验仅用于解释已经否定的 `SSTW-v1`，不得继续驱动新实验。
 
@@ -260,13 +260,27 @@ FULL_FLOW_GUIDED_WATERMARK = INSUFFICIENT_TO_DECIDE
 
 ## 9. 后续最短路线
 
-### G1：fresh saved-MP4 exact8（下一步）
+### G1：fresh saved-MP4 exact8（已完成）
 
 2 个异质内容，每组 `OFF_R1/OFF_R2/A/B`，同 prompt/seed/initial latent/非 carrier 参数。A/B 使用完整 13-window state trajectory与 public pilots。只验证：
 
 - normal VAE + first MP4 encode 后二维 effect 超过 OFF floor；
 - 每个内容的二维 response matrix 满秩且 `condition <= 10`；不再要求 raw 坐标近似对角；
 - 基础质量可接受。
+
+唯一闭合结果：
+
+```text
+run_id = 12307e2866c50f8d
+implementation = 785129e7c184720413f00aaeb60be2bec1d2bb01
+delivery = bc44f1792727a2ba72e84773cb46f914a6fcff4a
+archive_sha256 = 0bad50104f7a6197a9cfd049e529e696a5102f5c19208428616367d8da5cb05a
+status = FLOW_GUIDANCE_SAVED_MP4_NOT_FEASIBLE
+```
+
+执行链完整：第一内容复用已完成的四个 MP4，第二内容生成四个 MP4；总计8个可用MP4，续跑执行28次Transformer、6次VAE，无工程不足。两个内容均满足effect高于floor、response matrix满秩、`condition<=10`：lighthouse condition=`8.1210`，glass-garden condition=`1.6309`。但两者fit residual分别为`0.9761/0.6886`，均超过`0.5`；saved-MP4相对OFF质量变化分别约`0.317/0.320`与`0.0891/0.0889`，均超过`0.02`。
+
+因此当前construction确实能推动可观测二维子空间，但不能在fresh内容上保持预定13点状态轨迹与基础质量。不得通过放宽阈值、缩小结果后强度、改终态latent或继续扫描guidance boundary来挽救本版本。
 
 ### G2：单视频 observer + AISB/calibration
 
@@ -278,13 +292,17 @@ correct key、wrong keys、clean/OFF 共用全部 public candidates、fits 和�
 
 ## 10. 停止与 fallback
 
-若 fresh 内容的二维 response matrix 秩亏、`condition > 10`、效应不超过 floor 或质量失败，则：
+fresh G1 已因轨迹fit与质量失败，正式登记：
 
 ```text
 FLOW_GUIDED_OBSERVER_CARRIER = NOT_FEASIBLE
 ```
 
-随后才允许建立独立的新版本 `SSTW-noise`，测试 structured initial-noise 2D carrier + inversion observation。不得并行实现 noise、trained decoder 或多个 guidance observer。
+下一且唯一活动版本为独立 `SSTW-noise`：测试 structured initial-noise 2D carrier + 单MP4固定VAE-inversion observation。不得并行实现trained decoder或多个observer，不得把历史final-latent/VAE-latent注入重新命名为该路线。
+
+`SSTW-noise G0` 在看到新结果前冻结为：一个fresh prompt/seed；`OFF_R1/OFF_R2/A/B` exact4；四条件共享同一真实初始noise和全部非carrier生成参数；A/B仅在scheduler step 0之前加入相对initial-noise RMS=`0.03`的二维结构。第一坐标写入latent channel `0/1`的水平单周期反对称cosine，第二坐标写入channel `2/3`的垂直单周期反对称cosine，完整13点keyed state trajectory随latent时间轴写入。之后执行未经修改的8步Wan Flow、官方VAE decode与首次H264 MP4。
+
+读取端每次仅接受单个saved MP4：固定解码49帧，调用同一冻结Wan VAE的posterior `mode()`，按官方latent mean/std反归一回normalized latent，再从相同两个反对称channel pair/cosine basis得到`13x2` observation。matched OFF只用于本次carrier诊断的噪声地板和质量比较，不进入未来blind detector接口。唯一G0同时要求A/B效应超过OFF/numeric floor、二维response满秩、condition不超过10、trajectory fit residual不超过0.5、saved-MP4相对质量变化不超过0.02；任何一项失败即只否定该structured-noise construction，不得结果后改变强度、basis、prompt或判据。
 
 trained VAE/decoder carrier 当前不在项目范围。Dynamics-level trained velocity-field model watermark 也不是 MP4 content watermark，不作为直接 fallback。
 
@@ -298,9 +316,10 @@ trained VAE/decoder carrier 当前不在项目范围。Dynamics-level trained ve
 
 ```text
 SSTW_V1_UNTRAINED_WAN_PATCH_RELATION = NOT_FEASIBLE
-SSTW_V2_FLOW_GUIDED_OBSERVER = FEASIBLE_ON_ONE_MATCHED_CONTENT_ONLY
-ACTIVE_MODULE = flow_guidance_embedder
-CURRENT_STAGE = G1_FRESH_SAVED_MP4_EXACT8
-NEXT_ACTION = IMPLEMENT_AND_RUN_ONE_G1_GPU_DIAGNOSTIC
+SSTW_V2_FLOW_GUIDED_OBSERVER = NOT_FEASIBLE
+SSTW_NOISE_STRUCTURED_INITIAL_CARRIER = INSUFFICIENT_TO_DECIDE
+ACTIVE_MODULE = structured_initial_noise_embedder
+CURRENT_STAGE = SSTW_NOISE_G0_SAVED_MP4
+NEXT_ACTION = FREEZE_AND_RUN_ONE_STRUCTURED_NOISE_G0
 S2_AISB_CALIBRATION_VITERBI = NOT_YET_ACTIVE
 ```
