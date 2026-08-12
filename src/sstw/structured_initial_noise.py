@@ -144,7 +144,7 @@ def run(repo:Path,output:Path):
         cond,uncond=pipe.encode_prompt(prompt=g["prompt"],negative_prompt=g["negative_prompt"],do_classifier_free_guidance=True,num_videos_per_prompt=1,max_sequence_length=g["max_sequence_length"],device=device);cond=cond.to(pipe.transformer.dtype);uncond=uncond.to(pipe.transformer.dtype);base=pipe.prepare_latents(1,int(pipe.transformer.config.in_channels),g["height"],g["width"],g["frames"],torch.float32,device,torch.Generator(device=device).manual_seed(g["seed"]),None).detach()
       starts=conditions(torch,base,t,c["carrier"]["relative_initial_noise_rms"]); finals={}
       for name in CONDITIONS:
-        _emit_progress(f"noise_generate_{name}",torch); pipe.scheduler.set_timesteps(g["inference_steps"],device=device); pipe.scheduler.set_begin_index(0) if hasattr(pipe.scheduler,"set_begin_index") else None; z=starts[name].detach().clone()
+        _emit_progress(f"noise_generate_{name}",torch); pipe.scheduler=pipe.scheduler.__class__.from_config(pipe.scheduler.config); pipe.scheduler.set_timesteps(g["inference_steps"],device=device); pipe.scheduler.set_begin_index(0) if hasattr(pipe.scheduler,"set_begin_index") else None; z=starts[name].detach().clone()
         for ts in pipe.scheduler.timesteps:
           cv=_transformer_velocity(pipe,z,ts,cond,"cond",torch);uv=_transformer_velocity(pipe,z,ts,uncond,"uncond",torch);calls+=2
           with torch.inference_mode(): z=pipe.scheduler.step(uv+g["guidance_scale"]*(cv-uv),ts,z,return_dict=False)[0].detach()

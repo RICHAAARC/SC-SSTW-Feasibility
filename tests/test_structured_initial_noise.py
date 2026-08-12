@@ -28,3 +28,4 @@ def test_exact_tensor_basis_and_condition_identity():
   assert float(ratio)==pytest.approx(.03,abs=1e-6)
 def test_sources_compile():
  json.loads((ROOT/"configs/g0_structured_initial_noise.json").read_text());compile((ROOT/"src/sstw/structured_initial_noise.py").read_text(),"m","exec");compile((ROOT/"experiments/run_g0_structured_initial_noise.py").read_text(),"r","exec")
+ assert "pipe.scheduler=pipe.scheduler.__class__.from_config(pipe.scheduler.config)" in (ROOT/"src/sstw/structured_initial_noise.py").read_text()
