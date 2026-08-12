@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "protocol_id": "sstw_v2_g1_flow_guidance_saved_mp4",
+  "diagnostic_class": "DIAGNOSTIC_ONLY",
+  "model": {
+    "repository": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b"
+  },
+  "generation": {
+    "negative_prompt": "text, watermark, logo, camera motion, cuts, multiple subjects, flicker",
+    "guidance_scale": 5.0,
+    "max_sequence_length": 226,
+    "inference_steps": 8,
+    "frames": 49,
+    "height": 320,
+    "width": 512,
+    "fps": 8,
+    "groups": [
+      {
+        "id": "fresh_lighthouse",
+        "prompt": "locked camera, a solitary white lighthouse beside a dark blue ocean at twilight, gentle waves, clean horizon, no text, no cuts",
+        "seed": 84031
+      },
+      {
+        "id": "fresh_glass_garden",
+        "prompt": "locked camera, translucent colored glass flowers in a quiet indoor garden, soft daylight, subtle reflections, no text, no cuts",
+        "seed": 59207
+      }
+    ]
+  },
+  "guidance": {
+    "active_after_scheduler_index": 5,
+    "normal_steps_remaining": [6, 7],
+    "relative_update_rms": 0.005,
+    "conditions": ["OFF_R1", "OFF_R2", "A", "B"],
+    "trajectory": {
+      "length": 13,
+      "omega_0": 0.483321946706122,
+      "delta_phi": 0.39269908169872414,
+      "initial_phase_a": 0.19634954084936207,
+      "initial_phase_b": 1.1780972450961724,
+      "delta_times": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+      "key_a_hex": "535354572d76322d47312d412d7075626c69632d646961676e6f73746963",
+      "key_b_hex": "535354572d76322d47312d422d7075626c69632d646961676e6f73746963"
+    }
+  },
+  "criteria": {
+    "minimum_effect_to_floor_ratio": 8.0,
+    "numeric_floor_float32_eps_multiplier": 32.0,
+    "maximum_channel_condition_number": 10.0,
+    "maximum_fit_relative_residual": 0.5,
+    "maximum_final_rgb_relative_rms": 0.02
+  },
+  "allowed_statuses": [
+    "FLOW_GUIDANCE_SAVED_MP4_FEASIBLE",
+    "FLOW_GUIDANCE_SAVED_MP4_NOT_FEASIBLE",
+    "INSTRUMENTATION_INSUFFICIENT"
+  ]
+}
