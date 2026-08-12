@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 from pathlib import Path
 
 from .flow_guidance_embedder import (
@@ -120,9 +121,13 @@ def inverted_observer(torch, vae, frames, device):
 def evaluate(obs,t,quality,criteria):
     import numpy as np
     q={k:np.asarray(v,float) for k,v in obs.items()}; off=(q["OFF_R1"]+q["OFF_R2"])/2; offn=float(np.sqrt(np.mean((q["OFF_R1"]-q["OFF_R2"])**2))); floor=max(offn,criteria["numeric_floor_float32_eps_multiplier"]*2**-23*max(1,float(np.sqrt(np.mean(off**2)))))
-    design=np.concatenate([t["A"],t["B"]]); response=np.concatenate([q["A"]-off,q["B"]-off]); mt,*_=np.linalg.lstsq(design,response,rcond=None); m=mt.T; s=np.linalg.svd(m,compute_uv=False); cond=float("inf") if s[-1]==0 else float(s[0]/s[-1]); residual=float(np.sqrt(np.mean((response-design@mt)**2))/max(np.sqrt(np.mean(response**2)),1e-30)); effects={n:float(np.sqrt(np.mean((q[n]-off)**2))) for n in ("A","B")}
-    checks={"full_rank":bool(np.isfinite(m).all() and s[-1]>0),"condition":cond<=criteria["maximum_channel_condition_number"],"fit":residual<=criteria["maximum_fit_relative_residual"],"A_effect":effects["A"]>=criteria["minimum_effect_to_floor_ratio"]*floor,"B_effect":effects["B"]>=criteria["minimum_effect_to_floor_ratio"]*floor,"A_quality":quality["A"]<=criteria["maximum_saved_mp4_relative_rms"],"B_quality":quality["B"]<=criteria["maximum_saved_mp4_relative_rms"]}
-    return {"passed":all(checks.values()),"checks":checks,"matrix":m.tolist(),"condition":cond,"fit_relative_residual":residual,"effect_rms":effects,"floor":floor}
+    design=np.concatenate([t["A"],t["B"]]); response=np.concatenate([q["A"]-off,q["B"]-off]); mt,*_=np.linalg.lstsq(design,response,rcond=None); m=mt.T; s=np.linalg.svd(m,compute_uv=False)
+    condition_value=None if s[-1]<=0 or not np.isfinite(s).all() else float(s[0]/s[-1])
+    response_rms=float(np.sqrt(np.mean(response**2)))
+    residual_value=None if response_rms<=0 or not math.isfinite(response_rms) else float(np.sqrt(np.mean((response-design@mt)**2))/response_rms)
+    effects={n:float(np.sqrt(np.mean((q[n]-off)**2))) for n in ("A","B")}
+    checks={"full_rank":bool(np.isfinite(m).all() and s[-1]>0),"condition":condition_value is not None and condition_value<=criteria["maximum_channel_condition_number"],"fit":residual_value is not None and residual_value<=criteria["maximum_fit_relative_residual"],"A_effect":effects["A"]>=criteria["minimum_effect_to_floor_ratio"]*floor,"B_effect":effects["B"]>=criteria["minimum_effect_to_floor_ratio"]*floor,"A_quality":quality["A"]<=criteria["maximum_saved_mp4_relative_rms"],"B_quality":quality["B"]<=criteria["maximum_saved_mp4_relative_rms"]}
+    return {"passed":all(checks.values()),"checks":checks,"matrix":m.tolist(),"condition":condition_value,"fit_relative_residual":residual_value,"effect_rms":effects,"floor":floor}
 
 def run(repo:Path,output:Path):
     if output.exists(): raise NoiseInstrumentationError("output exists")

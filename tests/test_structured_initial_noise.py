@@ -7,6 +7,11 @@ def test_config_and_trajectory():
 def test_full_rank_affine_response_passes():
  import numpy as np
  c=load_noise_config(ROOT/"configs/g0_structured_initial_noise.json");t=trajectories(c);off=np.zeros((13,2));m=np.array([[.01,.003],[-.002,.012]]);o={"OFF_R1":off,"OFF_R2":off.copy(),"A":np.asarray(t["A"])@m.T,"B":np.asarray(t["B"])@m.T};assert evaluate(o,t,{"A":.01,"B":.01},c["criteria"])["passed"]
+def test_zero_signal_is_json_safe_scientific_no_go():
+ import numpy as np
+ c=load_noise_config(ROOT/"configs/g0_structured_initial_noise.json");t=trajectories(c);off=np.zeros((13,2));result=evaluate({name:off.copy() for name in ("OFF_R1","OFF_R2","A","B")},t,{"A":0.0,"B":0.0},c["criteria"])
+ assert not result["passed"] and result["condition"] is None and result["fit_relative_residual"] is None
+ json.dumps(result,allow_nan=False)
 def test_exact_tensor_basis_and_condition_identity():
  import pytest
  torch=pytest.importorskip("torch")
