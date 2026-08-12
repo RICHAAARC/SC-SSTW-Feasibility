@@ -256,7 +256,7 @@ FLOW_GUIDANCE_2D_AFFINE_SUBSPACE_ON_ONE_CONTENT = FEASIBLE
 FULL_FLOW_GUIDED_WATERMARK = INSUFFICIENT_TO_DECIDE
 ```
 
-这不是放宽阈值或结果后挑指标，而是删除与既定 affine-calibration 方法结构冲突的多余坐标对齐要求。原始状态、数值和失败项永久保留。新判据在任何 fresh 内容生成前冻结为：二维 odd-response matrix finite、det 非零、`condition <= 10`、每列 effect 超过 OFF/numeric floor、even/odd 与质量门保持原值。不得用 matched OFF 或该矩阵进入最终单视频检测；它只用于生成端因果诊断。
+这不是放宽阈值或结果后挑指标，而是删除与既定 affine-calibration 方法结构冲突的多余坐标对齐要求。原始状态、数值和失败项永久保留。新判据在任何 fresh 内容生成前冻结为：二维 response matrix finite、det 非零、`condition <= 10`、两条轨迹 effect 超过 OFF/numeric floor、固定fit residual与质量门。G0 的±轴even/odd结果继续作为局部线性证据记录，但G1 exact8没有±轴条件，不能伪造同一指标。不得用 matched OFF 或该矩阵进入最终单视频检测；它只用于生成端因果诊断。
 
 ## 9. 后续最短路线
 
