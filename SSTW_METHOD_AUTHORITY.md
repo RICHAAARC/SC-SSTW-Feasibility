@@ -5,7 +5,7 @@
 > 当前版本：`SSTW-v2`
 > 产品形态：生成时嵌入、零比特、单视频盲检测视频水印
 > 证据类别：`DIAGNOSTIC_ONLY`
-> 当前状态：`FLOW_GUIDANCE_PRIMITIVE_PENDING`
+> 当前状态：`FLOW_GUIDANCE_2D_SUBSPACE_FEASIBLE_ON_ONE_CONTENT`
 
 本文件是活跃仓库的方法身份、允许实现和下一科学问题的唯一权威。历史 Q/K relation 代码与实验仅用于解释已经否定的 `SSTW-v1`，不得继续驱动新实验。
 
@@ -149,7 +149,7 @@ g_\tau=\nabla_{x_\tau}\mathcal L_{wm}.
 
 若 gradient 非有限或 RMS 为零，该 construction 直接为不足/不可行，禁止伪造方向。
 
-## 8. G0：最快 guidance primitive
+## 8. G0：guidance primitive（已完成）
 
 G0 只回答：固定 observer 是否能在 Wan Flow state 上提供两个独立、方向正确、质量受限的控制方向。
 
@@ -187,7 +187,7 @@ state_targets:
 
 G0 不写 MP4、不运行 AISB/calibration/Viterbi；只比较最终 VAE RGB observer 和 OFF 图像质量差异。
 
-### 8.3 最小判据
+### 8.3 原始预注册判据与结果
 
 必须逐项满足：
 
@@ -210,14 +210,62 @@ INSTRUMENTATION_INSUFFICIENT
 
 `FEASIBLE` 只允许进入 G1 saved-MP4 exact8；不是完整 SSTW 成功。
 
+唯一有效运行：
+
+```text
+run_id = 53b555d04484fa20
+implementation = dbb80cdb0456dedb8d6172474b6397332450f0c4
+delivery = 4dbd8208d456069dced8c6c8c010580a2bb5f357
+archive_sha256 = 4bc54f566af93c6bb4e27f0ae083657ebb2aa22bb050aa3f33de93ef757cf845
+status = FLOW_GUIDANCE_PRIMITIVE_NOT_FEASIBLE
+transformer_calls = 36
+vae_decodes = 8
+```
+
+该运行完整经过真实 Wan、两个可微 VAE VJP、六个独立 UniPC forks、终态 VAE 与指标计算；不是工程失败。原判据仅有 `G1/G2 cross_to_own <= 0.5` 两项失败，其余十三项通过：
+
+```text
+G1 own RMS = 1.513589e-3
+G1 cross/own = 0.554935
+G2 own RMS = 1.078376e-3
+G2 cross/own = 0.710919
+odd/floor = 396.78, 282.69
+even/odd = 0.0561, 0.0789
+final RGB relative RMS = 0.00399 .. 0.00424
+gradient cosine = -0.03659
+```
+
+### 8.4 方法解释纠正
+
+原始 `cross/own <= 0.5` 要求 raw observer 坐标近似对角。它适合筛选无需校准的控制轴，但不是本方法“二维仿射通道 + public calibration”的必要条件。实际 odd-response 传递矩阵为：
+
+\[
+M=\begin{bmatrix}
+0.001512672 & -0.000766078\\
+-0.000838704 & 0.001077700
+\end{bmatrix},
+\]
+
+其 `det(M)=9.87693e-7`、`cond_2(M)=4.58067`，满足 calibration 模块既有的 `condition <= 10` 可逆二维通道边界。两个轴所有13个时间点目标方向均为正；以该单一 public matrix 做 equalization 后，两列均恢复对应单位轴，逐帧最大偏差分别约 `0.198/0.135`。
+
+因此必须同时登记：
+
+```text
+RAW_AXIS_DIAGONALITY_G0 = NOT_FEASIBLE
+FLOW_GUIDANCE_2D_AFFINE_SUBSPACE_ON_ONE_CONTENT = FEASIBLE
+FULL_FLOW_GUIDED_WATERMARK = INSUFFICIENT_TO_DECIDE
+```
+
+这不是放宽阈值或结果后挑指标，而是删除与既定 affine-calibration 方法结构冲突的多余坐标对齐要求。原始状态、数值和失败项永久保留。新判据在任何 fresh 内容生成前冻结为：二维 odd-response matrix finite、det 非零、`condition <= 10`、每列 effect 超过 OFF/numeric floor、even/odd 与质量门保持原值。不得用 matched OFF 或该矩阵进入最终单视频检测；它只用于生成端因果诊断。
+
 ## 9. 后续最短路线
 
-### G1：saved-MP4 exact8
+### G1：fresh saved-MP4 exact8（下一步）
 
 2 个异质内容，每组 `OFF_R1/OFF_R2/A/B`，同 prompt/seed/initial latent/非 carrier 参数。A/B 使用完整 13-window state trajectory与 public pilots。只验证：
 
 - normal VAE + first MP4 encode 后二维 effect 超过 OFF floor；
-- 两轴不塌缩；
+- 每个内容的二维 response matrix 满秩且 `condition <= 10`；不再要求 raw 坐标近似对角；
 - 基础质量可接受。
 
 ### G2：单视频 observer + AISB/calibration
@@ -230,7 +278,7 @@ correct key、wrong keys、clean/OFF 共用全部 public candidates、fits 和�
 
 ## 10. 停止与 fallback
 
-若 G0 失败，先确认不是 OOM、autograd断链、VAE scaling/shape 或 scheduler fork 工程错误。工程闭合后仍失败，则：
+若 fresh 内容的二维 response matrix 秩亏、`condition > 10`、效应不超过 floor 或质量失败，则：
 
 ```text
 FLOW_GUIDED_OBSERVER_CARRIER = NOT_FEASIBLE
@@ -250,9 +298,9 @@ trained VAE/decoder carrier 当前不在项目范围。Dynamics-level trained ve
 
 ```text
 SSTW_V1_UNTRAINED_WAN_PATCH_RELATION = NOT_FEASIBLE
-SSTW_V2_FLOW_GUIDED_OBSERVER = INSUFFICIENT_TO_DECIDE
+SSTW_V2_FLOW_GUIDED_OBSERVER = FEASIBLE_ON_ONE_MATCHED_CONTENT_ONLY
 ACTIVE_MODULE = flow_guidance_embedder
-CURRENT_STAGE = G0_FLOW_GUIDANCE_PRIMITIVE
-NEXT_ACTION = IMPLEMENT_AND_RUN_ONE_G0_GPU_DIAGNOSTIC
+CURRENT_STAGE = G1_FRESH_SAVED_MP4_EXACT8
+NEXT_ACTION = IMPLEMENT_AND_RUN_ONE_G1_GPU_DIAGNOSTIC
 S2_AISB_CALIBRATION_VITERBI = NOT_YET_ACTIVE
 ```
