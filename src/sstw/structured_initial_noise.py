@@ -152,7 +152,10 @@ def run(repo:Path,output:Path):
       starts=base=cond=uncond=None;pipe.maybe_free_model_hooks();gc.collect();torch.cuda.empty_cache()
       paths={}
       for name in CONDITIONS:
-        _emit_progress(f"noise_decode_encode_{name}",torch);z=finals[name].to(device);rgb=decode_wan_latents_torch(z,pipe.vae,torch);decodes+=1;array=((rgb[0].permute(1,2,3,0).float().clamp(-1,1)+1)*127.5).round().byte().cpu().numpy();p=output/"videos"/f"noise_{name}.mp4";export_to_video(list(array),str(p),fps=g["fps"],quality=5.0,bitrate=None,macro_block_size=16);paths[name]=p;del z,rgb,array;pipe.maybe_free_model_hooks();gc.collect();torch.cuda.empty_cache()
+        _emit_progress(f"noise_decode_encode_{name}",torch);z=finals[name].to(device)
+        with torch.inference_mode():
+          rgb=decode_wan_latents_torch(z,pipe.vae,torch);decodes+=1;array=((rgb[0].permute(1,2,3,0).float().clamp(-1,1)+1)*127.5).round().byte().cpu().numpy()
+        p=output/"videos"/f"noise_{name}.mp4";export_to_video(list(array),str(p),fps=g["fps"],quality=5.0,bitrate=None,macro_block_size=16);paths[name]=p;del z,rgb,array;pipe.maybe_free_model_hooks();gc.collect();torch.cuda.empty_cache()
       saved={n:np.stack(list(iio.imiter(p,plugin="FFMPEG"))) for n,p in paths.items()};obs={}
       for n in CONDITIONS: obs[n]=inverted_observer(torch,pipe.vae,saved[n],device);encodes+=1;pipe.maybe_free_model_hooks();gc.collect();torch.cuda.empty_cache()
       values={n:saved[n].astype(np.float32)/127.5-1 for n in CONDITIONS};quality=_saved_rgb_quality(values,np);ev=evaluate(obs,t,quality,c["criteria"]);status="STRUCTURED_NOISE_PRIMITIVE_FEASIBLE" if ev["passed"] else "STRUCTURED_NOISE_PRIMITIVE_NOT_FEASIBLE";result={"schema_version":1,"protocol_id":c["protocol_id"],"diagnostic_class":"DIAGNOSTIC_ONLY","status":status,"runtime":runtime_capability_diagnostics(torch)|{"diffusers":diffusers.__version__},"observations":obs,"quality":quality,"evaluation":ev,"execution":{"transformer_calls":calls,"vae_decodes":decodes,"vae_encodes":encodes,"mp4_count":4}}

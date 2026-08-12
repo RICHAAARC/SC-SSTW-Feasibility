@@ -302,6 +302,8 @@ FLOW_GUIDED_OBSERVER_CARRIER = NOT_FEASIBLE
 
 `SSTW-noise G0` 在看到新结果前冻结为：一个fresh prompt/seed；`OFF_R1/OFF_R2/A/B` exact4；四条件共享同一真实初始noise和全部非carrier生成参数；A/B仅在scheduler step 0之前加入相对initial-noise RMS=`0.03`的二维结构。第一坐标写入latent channel `0/1`的水平单周期反对称cosine，第二坐标写入channel `2/3`的垂直单周期反对称cosine，完整13点keyed state trajectory随latent时间轴写入。之后执行未经修改的8步Wan Flow、官方VAE decode与首次H264 MP4。
 
+首次工程尝试`run_id=8ebdd045ca397a98`在四个Flow条件全部生成后，于首个OFF VAE decode因调用方遗漏`torch.inference_mode()`而为冻结VAE错误构建完整反向图，最终OOM；没有生成任何saved MP4、observation或科学指标，登记为`INSTRUMENTATION_INSUFFICIENT / SCIENTIFIC_RESULT_NONE`。修复只恢复终态VAE decode的纯推理语义，不改变本段任何construction或判据；该次不计作SSTW-noise科学尝试。
+
 读取端每次仅接受单个saved MP4：固定解码49帧，调用同一冻结Wan VAE的posterior `mode()`，按官方latent mean/std反归一回normalized latent，再从相同两个反对称channel pair/cosine basis得到`13x2` observation。matched OFF只用于本次carrier诊断的噪声地板和质量比较，不进入未来blind detector接口。唯一G0同时要求A/B效应超过OFF/numeric floor、二维response满秩、condition不超过10、trajectory fit residual不超过0.5、saved-MP4相对质量变化不超过0.02；任何一项失败即只否定该structured-noise construction，不得结果后改变强度、basis、prompt或判据。
 
 trained VAE/decoder carrier 当前不在项目范围。Dynamics-level trained velocity-field model watermark 也不是 MP4 content watermark，不作为直接 fallback。
