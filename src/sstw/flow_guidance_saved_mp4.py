@@ -7,6 +7,8 @@ import gc
 import json
 import math
 import os
+import hashlib
+import zipfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -30,6 +32,7 @@ from .state_generator import FrozenStateConfig, keyed_trajectory
 
 
 CONDITIONS = ("OFF_R1", "OFF_R2", "A", "B")
+REUSABLE_FIRST_GROUP_ARCHIVE_SHA256 = "f68d71f8c4efa9dada120743f137ceb9be6f5cf1515772546d7c8c61a5a06899"
 ALLOWED_STATUSES = (
     "FLOW_GUIDANCE_SAVED_MP4_FEASIBLE",
     "FLOW_GUIDANCE_SAVED_MP4_NOT_FEASIBLE",
@@ -138,6 +141,51 @@ def _observer_numpy(frames: Any, numpy_module: Any) -> list[list[float]]:
     return numpy_module.stack((q1,q2),axis=1).astype(float).tolist()
 
 
+def _saved_video_arrays(paths: Mapping[str, Path], imageio_module: Any, numpy_module: Any):
+    values = {}
+    for name in CONDITIONS:
+        frames = numpy_module.stack(list(imageio_module.imiter(paths[name], plugin="FFMPEG")), axis=0)
+        if frames.shape != (49, 320, 512, 3) or not numpy_module.isfinite(frames).all():
+            raise G1InstrumentationError(f"saved MP4 is invalid for {name}")
+        values[name] = frames.astype(numpy_module.float32) / 127.5 - 1.0
+    return values
+
+
+def _saved_rgb_quality(values: Mapping[str, Any], numpy_module: Any) -> dict[str, float]:
+    reference = values["OFF_R1"]
+    denominator = float(numpy_module.sqrt(numpy_module.mean(reference**2)))
+    if not math.isfinite(denominator) or denominator <= 0:
+        raise G1InstrumentationError("saved MP4 quality denominator is invalid")
+    return {
+        name: float(numpy_module.sqrt(numpy_module.mean((values[name] - reference) ** 2)) / denominator)
+        for name in ("A", "B")
+    }
+
+
+def _reuse_first_group_videos(archive_path: Path, videos: Path) -> dict[str, Path]:
+    if not archive_path.is_file():
+        raise G1InstrumentationError("reusable first-group archive is unavailable")
+    digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    if digest != REUSABLE_FIRST_GROUP_ARCHIVE_SHA256:
+        raise G1InstrumentationError("reusable first-group archive identity changed")
+    selected: dict[str, tuple[str, bytes]] = {}
+    with zipfile.ZipFile(archive_path) as archive:
+        for name in CONDITIONS:
+            suffix = f"/output/videos/fresh_lighthouse_{name}.mp4"
+            matches = [item for item in archive.namelist() if item.endswith(suffix)]
+            if len(matches) != 1:
+                raise G1InstrumentationError(f"reusable first-group {name} MP4 is missing")
+            selected[name] = (matches[0], archive.read(matches[0]))
+    paths: dict[str, Path] = {}
+    for name, (_, payload) in selected.items():
+        if not payload:
+            raise G1InstrumentationError(f"reusable first-group {name} MP4 is empty")
+        path = videos / f"fresh_lighthouse_{name}.mp4"
+        path.write_bytes(payload)
+        paths[name] = path
+    return paths
+
+
 def evaluate_group(observations: Mapping[str, Sequence[Sequence[float]]], trajectories: Mapping[str, Sequence[Sequence[float]]], rgb_quality: Mapping[str, float], criteria: Mapping[str, Any]) -> dict[str, Any]:
     import numpy as np
     q = {name: np.asarray(observations[name], dtype=np.float64) for name in CONDITIONS}
@@ -166,7 +214,7 @@ def evaluate_group(observations: Mapping[str, Sequence[Sequence[float]]], trajec
     return {"checks": checks, "matrix": matrix.tolist(), "singular_values": singular.tolist(), "condition": condition, "fit_relative_residual": residual, "effect_rms": effects, "floor": {"off_repeat_rms": off_floor, "numeric": numeric, "effective": floor}, "passed": all(checks.values())}
 
 
-def run_g1_once(repo_root: Path, output: Path, config_path: Path | None = None) -> dict[str, Any]:
+def run_g1_once(repo_root: Path, output: Path, config_path: Path | None = None, reuse_first_group_archive: Path | None = None) -> dict[str, Any]:
     if output.exists() or not output.parent.is_dir():
         raise G1InstrumentationError("G1 output must be absent")
     config = load_g1_config(config_path or repo_root / "configs/g1_flow_guidance_saved_mp4.json")
@@ -182,11 +230,28 @@ def run_g1_once(repo_root: Path, output: Path, config_path: Path | None = None) 
     canary = wan_checkpoint_canary_torch(torch, AutoencoderKLWan, device)
     trajectories = frozen_trajectories(config)
     output.mkdir(); videos = output / "videos"; videos.mkdir()
-    groups: dict[str, Any] = {}; transformer_calls = vae_decodes = 0
+    groups: dict[str, Any] = {}; transformer_calls = vae_decodes = generated_mp4 = 0
     generation = config["generation"]
     try:
         for group in generation["groups"]:
-            group_id = group["id"]; _emit_progress(f"g1_{group_id}_prefix", torch)
+            group_id = group["id"]
+            if group_id == "fresh_lighthouse" and reuse_first_group_archive is not None:
+                _emit_progress("g1_fresh_lighthouse_reuse_saved_mp4", torch)
+                paths = _reuse_first_group_videos(reuse_first_group_archive, videos)
+                saved = _saved_video_arrays(paths, iio, np)
+                observations = {name: _observer_numpy(((saved[name] + 1.0) * 127.5).round().clip(0, 255).astype(np.uint8), np) for name in CONDITIONS}
+                rgb_quality = _saved_rgb_quality(saved, np)
+                evaluation = evaluate_group(observations, trajectories, rgb_quality, config["criteria"])
+                groups[group_id] = {
+                    "prompt": group["prompt"], "seed": group["seed"],
+                    "reused_prior_generation": {"archive_sha256": REUSABLE_FIRST_GROUP_ARCHIVE_SHA256},
+                    "observations": observations, "rgb_quality": rgb_quality,
+                    "videos": {name: {"path": str(path.relative_to(output)), "size": path.stat().st_size} for name, path in paths.items()},
+                    "evaluation": evaluation,
+                }
+                (output / f"{group_id}.result.json").write_text(json.dumps(groups[group_id], sort_keys=True, indent=2, allow_nan=False) + "\n")
+                continue
+            _emit_progress(f"g1_{group_id}_prefix", torch)
             with torch.inference_mode():
                 cond, uncond = pipe.encode_prompt(prompt=group["prompt"], negative_prompt=generation["negative_prompt"], do_classifier_free_guidance=True, num_videos_per_prompt=1, max_sequence_length=generation["max_sequence_length"], device=device)
                 cond=cond.to(pipe.transformer.dtype).detach(); uncond=uncond.to(pipe.transformer.dtype).detach()
@@ -204,20 +269,30 @@ def run_g1_once(repo_root: Path, output: Path, config_path: Path | None = None) 
             final={}
             for name in CONDITIONS:
                 final[name],calls=_continue_condition(pipe,forks[name],snapshot,summary,ts,cond,uncond,config,torch); transformer_calls+=calls
-            observations={}; rgb={}; mp4s={}
+            observations={}; mp4s={}; paths={}
             with torch.inference_mode():
                 for name in CONDITIONS:
                     decoded=decode_wan_latents_torch(final[name],pipe.vae,torch); vae_decodes+=1
                     array=((decoded[0].permute(1,2,3,0).float().clamp(-1,1)+1)*127.5).round().to(torch.uint8).cpu().numpy()
                     path=videos/f"{group_id}_{name}.mp4"; export_to_video(list(array),str(path),fps=generation["fps"],quality=5.0,bitrate=None,macro_block_size=16)
-                    saved=np.stack(list(iio.imiter(path,plugin="FFMPEG")),axis=0)
-                    observations[name]=_observer_numpy(saved,np); rgb[name]=decoded.detach().float().cpu(); mp4s[name]={"path":str(path.relative_to(output)),"size":path.stat().st_size}
-            rgb_quality={name: float(((rgb[name]-rgb["OFF_R1"]).square().mean().sqrt()/rgb["OFF_R1"].square().mean().sqrt()).item()) for name in ("A","B")}
+                    generated_mp4 += 1; paths[name]=path; mp4s[name]={"path":str(path.relative_to(output)),"size":path.stat().st_size}
+                    del decoded, array
+            saved = _saved_video_arrays(paths, iio, np)
+            observations = {name: _observer_numpy(((saved[name] + 1.0) * 127.5).round().clip(0, 255).astype(np.uint8), np) for name in CONDITIONS}
+            rgb_quality = _saved_rgb_quality(saved, np)
             evaluation=evaluate_group(observations,trajectories,rgb_quality,config["criteria"])
             groups[group_id]={"prompt":group["prompt"],"seed":group["seed"],"gradient":grad_diag,"updates":update_diag,"observations":observations,"rgb_quality":rgb_quality,"videos":mp4s,"evaluation":evaluation}
+            (output / f"{group_id}.result.json").write_text(json.dumps(groups[group_id], sort_keys=True, indent=2, allow_nan=False) + "\n")
+            # A content group is a complete independent experiment unit.  Do not
+            # retain its GPU latents, scheduler history, embeddings, or model-hook
+            # state while starting the next fresh content.
+            latent = snapshot = summary = forks = final = cond = uncond = ts = saved = paths = None
+            pipe.maybe_free_model_hooks(); gc.collect(); torch.cuda.empty_cache()
         status="FLOW_GUIDANCE_SAVED_MP4_FEASIBLE" if all(v["evaluation"]["passed"] for v in groups.values()) else "FLOW_GUIDANCE_SAVED_MP4_NOT_FEASIBLE"
-        result={"schema_version":1,"protocol_id":config["protocol_id"],"diagnostic_class":"DIAGNOSTIC_ONLY","status":status,"runtime":runtime,"checkpoint_canary":canary,"trajectories":{k:[list(p) for p in v] for k,v in trajectories.items()},"groups":groups,"execution":{"transformer_calls":transformer_calls,"vae_decodes":vae_decodes,"mp4_count":8}}
-        if transformer_calls != 56 or vae_decodes != 12: raise G1InstrumentationError("G1 execution budget changed")
+        reused = reuse_first_group_archive is not None
+        expected_calls, expected_decodes, expected_generated = (28, 6, 4) if reused else (56, 12, 8)
+        result={"schema_version":1,"protocol_id":config["protocol_id"],"diagnostic_class":"DIAGNOSTIC_ONLY","status":status,"runtime":runtime,"checkpoint_canary":canary,"trajectories":{k:[list(p) for p in v] for k,v in trajectories.items()},"groups":groups,"execution":{"transformer_calls":transformer_calls,"vae_decodes":vae_decodes,"generated_mp4_count":generated_mp4,"reused_mp4_count":8-generated_mp4,"usable_mp4_count":8}}
+        if transformer_calls != expected_calls or vae_decodes != expected_decodes or generated_mp4 != expected_generated: raise G1InstrumentationError("G1 execution budget changed")
         data=(json.dumps(result,sort_keys=True,indent=2,allow_nan=False)+"\n").encode(); temp=output/".result.json.tmp"
         with temp.open("xb") as handle: handle.write(data); handle.flush(); os.fsync(handle.fileno())
         os.replace(temp,output/"result.json"); return result

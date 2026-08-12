@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 import pytest
-from sstw.flow_guidance_saved_mp4 import evaluate_group,frozen_trajectories,load_g1_config
+from sstw.flow_guidance_saved_mp4 import evaluate_group,frozen_trajectories,load_g1_config,_saved_rgb_quality
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -23,3 +23,19 @@ def test_json_and_sources_compile():
     json.loads((ROOT/"configs/g1_flow_guidance_saved_mp4.json").read_text())
     compile((ROOT/"src/sstw/flow_guidance_saved_mp4.py").read_text(),"module","exec")
     compile((ROOT/"experiments/run_g1_flow_guidance_saved_mp4.py").read_text(),"runner","exec")
+
+def test_saved_mp4_quality_is_measured_after_encoding():
+    np=pytest.importorskip("numpy")
+    off=np.ones((49,2,2,3),dtype=np.float32)*.25
+    values={"OFF_R1":off,"OFF_R2":off.copy(),"A":off+.001,"B":off-.002}
+    result=_saved_rgb_quality(values,np)
+    assert result["A"] == pytest.approx(.004, abs=1e-7) and result["B"] == pytest.approx(.008, abs=1e-7)
+
+def test_resume_and_group_cleanup_are_explicit():
+    source=(ROOT/"src/sstw/flow_guidance_saved_mp4.py").read_text()
+    assert "reuse_first_group_archive" in source
+    assert "reused_prior_generation" in source
+    assert "latent = snapshot = summary = forks = final = cond = uncond = ts" in source
+    assert "pipe.maybe_free_model_hooks(); gc.collect(); torch.cuda.empty_cache()" in source
+    runner=(ROOT/"experiments/run_g1_flow_guidance_saved_mp4.py").read_text()
+    assert '"--reuse-first-group-archive"' in runner and '"exception_chain"' in runner
